@@ -154,14 +154,14 @@ class Prompting(unittest.TestCase):
         snap = snapshot(rows)
         for n_ctx in (2048, 4096, 8192):
             msgs, max_tokens = prompts.build_messages(snap, "largest increase in Africa?", n_ctx,
-                                                      with_query=True)
+                                                      engine=Q)
             result = prompts.fit_result(run({"value": "C - B", "sort": "desc", "limit": 20}, snap))
             full = prompts.follow_up(msgs, '{"query_needed": true, "value": "C - B"}', result)
             used = sum(context.estimate_tokens(m["content"]) for m in full)
             self.assertLess(used + max_tokens, n_ctx, n_ctx)
 
     def test_follow_up_keeps_prefix(self):
-        msgs, _ = prompts.build_messages(snapshot(), "q", 4096, with_query=True)
+        msgs, _ = prompts.build_messages(snapshot(), "q", 4096, engine=Q)
         full = prompts.follow_up(msgs, '{"query_needed": false}', None)
         self.assertEqual(full[:2], msgs)
         self.assertIn("No query needed", full[-1]["content"])

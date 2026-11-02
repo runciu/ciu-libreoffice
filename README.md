@@ -8,7 +8,14 @@ Version 0.0.1. Calc only for now.
 
 **Ask.** Get a streamed answer about the selected cells, or use one of the shortcuts: Summarise, Explain formulas, Find issues.
 
-Questions that need every row, such as "which African country grew most" on a 240-row table, are answered with an exact query. The model writes a small query (filters, a calculated value such as `C - B`, a sort, top N, or a sum, mean, median, min, max or count). The extension runs it over all rows and gives the result back to the model before it answers. The window shows the query it ran.
+Questions that need every row, such as "which African country grew most" on a 240-row table, are answered with an exact query. The model writes one SQL `SELECT` over the selection, the extension runs it over all rows, and the result goes back to the model before it answers. The window shows the SQL it ran. If the query fails, the model sees the error and gets one chance to correct it.
+
+The SQL runs in a locked-down, in-memory SQLite database:
+- Only reading is allowed. Writes, `ATTACH`, `PRAGMA` and extension loading are refused, so it cannot touch your files or the network.
+- Queries are stopped after 2 seconds, and at most 20 rows come back.
+- Your sheet is never modified by a question.
+
+If LibreOffice's Python has no SQLite, a simpler built-in query form is used instead (filters, a calculated value, sort, top N, aggregates). **CIU > Check CIU connection** shows which one is active.
 
 **Propose change.** CIU returns a plan built from three operations:
 
@@ -54,7 +61,9 @@ python/pythonpath/ciu_lo/
     context.py      selection to prompt text, with column statistics
     prompts.py      prompts and context budget
     plan.py         plan parsing and validation
-    query.py        exact queries over all rows
+    sql.py          sandboxed SQL over all rows
+    query.py        built-in query form, used when SQLite is missing
+    engine.py       picks between the two
   calc/     reading selections and applying plans
   ui/       the assistant window and main-thread dispatch
 registry/Addons.xcu         the CIU menu

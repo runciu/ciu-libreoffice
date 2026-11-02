@@ -11,7 +11,8 @@ from com.sun.star.awt import XActionListener, XTopWindowListener
 
 from ..calc import executor, reader
 from ..core import prompts
-from ..core import query as querymod
+from ..core import engine as enginemod
+from ..core.query import QueryError
 from ..core.plan import PLAN_SCHEMA, PlanError, parse_plan
 from ..core.ciu_client import CIUClient, CIUError
 from ..core.context import summary_line
@@ -247,11 +248,12 @@ class AssistantDialog(object):
             if not status.ready:
                 self.ui.post(lambda: self._show_answer(status.describe()))
                 return
+            engine = enginemod.current() if with_query else None
             self._fit_and_send(
                 lambda scale: prompts.build_messages(snap, question, status.n_ctx, scale,
-                                                     with_query=with_query),
+                                                     engine=engine),
                 lambda messages, max_tokens: self._answer(
-                    snap, messages, max_tokens, with_query))
+                    snap, messages, max_tokens, engine))
             if self.stop_event.is_set():
                 self.ui.post(lambda: self._append_answer("\n[stopped]"))
         except CIUError as e:
@@ -263,26 +265,43 @@ class AssistantDialog(object):
         finally:
             self.ui.post(lambda: self._set_busy(False))
 
-    def _answer(self, snap, messages, max_tokens, with_query):
+    def _answer(self, snap, messages, max_tokens, engine):
         """Optional query step, then the streamed answer. Worker thread."""
-        if with_query:
+        if engine is not None:
             self.ui.post(lambda: self._show_answer("Thinking..."))
-            reply = self.client.chat_json(messages, querymod.QUERY_SCHEMA,
-                                          max_tokens=prompts.QUERY_REPLY_TOKENS)
+            messages, result, shown = self._run_query(snap, messages, engine)
             if self.stop_event.is_set():
-                return
-            try:
-                q = querymod.parse(reply, snap)
-                result = prompts.fit_result(q.run()) if q else None
-                shown = "Computed: %s\n\n" % q.describe() if q else ""
-            except querymod.QueryError as e:
-                result = "The query could not be run: %s" % e
-                shown = ""
+                return None
             self.ui.post(lambda: self._show_answer(shown))
-            messages = prompts.follow_up(messages, reply or '{"query_needed": false}', result)
+            messages = prompts.follow_up(messages[:-1], messages[-1]["content"], result)
         return self.client.chat_stream(
             messages, on_delta=self.ui.post_text,
             should_stop=self.stop_event.is_set, max_tokens=max_tokens)
+
+    def _run_query(self, snap, messages, engine, attempts=2):
+        """Ask for a query and run it, letting the model fix one failure.
+        Returns (messages ending with the model's last reply, result text or
+        None, text to show above the answer)."""
+        error = None
+        for attempt in range(attempts):
+            reply = self.client.chat_json(messages, engine.SCHEMA,
+                                          max_tokens=prompts.QUERY_REPLY_TOKENS)
+            reply = reply or engine.no_query_reply()
+            if self.stop_event.is_set():
+                break
+            try:
+                q = engine.parse(reply, snap)
+                if q is None:
+                    return messages + [{"role": "assistant", "content": reply}], None, ""
+                result = prompts.fit_result(q.run())
+                shown = "Computed with %s: %s\n\n" % (engine.NAME, q.describe())
+                return messages + [{"role": "assistant", "content": reply}], result, shown
+            except QueryError as e:
+                error = str(e)
+                if attempt + 1 < attempts:
+                    messages = prompts.retry_turn(messages, reply, error)
+        failed = "The query could not be run: %s" % error if error else None
+        return messages + [{"role": "assistant", "content": reply}], failed, ""
 
     def _fit_and_send(self, build, send):
         """Send with a smaller selection each time the server reports the

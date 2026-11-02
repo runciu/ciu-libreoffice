@@ -1,7 +1,6 @@
 """Prompts and the context-window budget."""
 
 from . import context as ctxmod
-from . import query as querymod
 
 SYSTEM = (
     "You are CIU, a local assistant inside LibreOffice Calc. You are given a "
@@ -23,7 +22,7 @@ DEFAULT_N_CTX = 4096
 MIN_CONTEXT_TOKENS = 200
 MAX_CONTEXT_TOKENS = 8000
 SAFETY = 0.9
-QUERY_RESERVE = 500
+RESULT_TOKENS = 500
 QUERY_REPLY_TOKENS = 200
 
 # Applied to the selection budget on successive attempts if the server still
@@ -51,12 +50,15 @@ def _messages(system, snapshot, request, budget):
             {"role": "user", "content": user}]
 
 
-def build_messages(snapshot, question, n_ctx, scale=1.0, with_query=False):
-    """Returns (messages, max_tokens). with_query adds the query instructions
-    and leaves room for a query and its result before the answer."""
+def build_messages(snapshot, question, n_ctx, scale=1.0, engine=None):
+    """Returns (messages, max_tokens). With an engine, adds its query
+    instructions and leaves room for queries and a result before the answer."""
     max_tokens = answer_tokens(n_ctx or DEFAULT_N_CTX)
-    system = SYSTEM + "\n\n" + querymod.INSTRUCTIONS if with_query else SYSTEM
-    reserve = QUERY_RESERVE + QUERY_REPLY_TOKENS if with_query else 0
+    system = SYSTEM
+    reserve = 0
+    if engine is not None:
+        system = SYSTEM + "\n\n" + engine.instructions(ctxmod.Table(snapshot))
+        reserve = engine.RESERVE + QUERY_REPLY_TOKENS
     budget = context_budget(n_ctx, system, question, max_tokens + reserve, scale)
     return _messages(system, snapshot, question, budget), max_tokens
 
@@ -73,7 +75,14 @@ def follow_up(messages, query_reply, result):
                        {"role": "user", "content": note}]
 
 
-def fit_result(text, limit=QUERY_RESERVE):
+def retry_turn(messages, reply, error):
+    """Show the model why its query failed and ask for a corrected one."""
+    return messages + [{"role": "assistant", "content": reply},
+                       {"role": "user", "content": "That failed: %s\nReply with corrected "
+                                                   "JSON only." % error}]
+
+
+def fit_result(text, limit=RESULT_TOKENS):
     """Drop result rows from the end until the text fits its reserve."""
     lines = text.split("\n")
     while len(lines) > 3 and ctxmod.estimate_tokens("\n".join(lines)) > limit:

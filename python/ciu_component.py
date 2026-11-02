@@ -49,7 +49,9 @@ class Assistant(unohelper.Base, XJobExecutor):
 
         client = CIUClient()
         st = client.status()
-        text = st.describe() + "\n\nAddress: %s" % client.base
+        from ciu_lo.core import engine
+        text = st.describe() + "\n\nAddress: %s\nExact queries: %s" % (
+            client.base, engine.describe())
         if st.error and not st.reachable:
             text += "\nDetail: %s" % st.error
         self._message("CIU connection", text)

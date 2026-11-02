@@ -66,6 +66,20 @@ class QueryError(Exception):
     pass
 
 
+NAME = "built-in queries"
+AVAILABLE = True
+RESERVE = 500
+SCHEMA = QUERY_SCHEMA
+
+
+def instructions(table):
+    return INSTRUCTIONS
+
+
+def no_query_reply():
+    return json.dumps({"query_needed": False})
+
+
 def to_number(v):
     """Numbers, and text that plainly holds one: "1,234", "+4.68%", "-0.4"."""
     if is_num(v):

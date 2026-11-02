@@ -139,41 +139,56 @@ class Extension(unittest.TestCase):
         self.assertIn("4096-token context", state["answer"])
         self.assertEqual(len(mock_ciu.STATE.requests), 3)
 
-    def test_5a_question_runs_exact_query(self):
-        mock_ciu.STATE.plan_reply = json.dumps(
-            {"query_needed": True, "value": "B", "sort": "desc", "limit": 1})
+    def test_5a_question_runs_sql(self):
+        sql = "SELECT a, b FROM t ORDER BY b DESC LIMIT 1"
+        mock_ciu.STATE.plan_reply = json.dumps({"sql_needed": True, "sql": sql})
         OFFICE.hook("prompt:Which item costs the most?")
         OFFICE.hook("press:ask")
         state = wait_done()
-        self.assertTrue(state["answer"].startswith(
-            "Computed: all rows, value = B, highest first, top 1\n\n"), state["answer"])
+        self.assertTrue(state["answer"].startswith("Computed with SQL: %s\n\n" % sql),
+                        state["answer"])
         self.assertTrue(state["answer"].endswith("Total is =SUM(B2:B4)."))
         router, final = mock_ciu.STATE.requests
-        self.assertIn("query_needed", json.dumps(router["response_format"]))
-        self.assertFalse(router["stream"])
-        self.assertTrue(final["stream"])
+        self.assertIn("sql_needed", json.dumps(router["response_format"]))
+        self.assertIn("The selection is the table t with columns: row (sheet row number), "
+                      "a (Item), b (Cost)", router["messages"][0]["content"])
         self.assertEqual(final["messages"][:2], router["messages"])
         last = final["messages"][-1]["content"]
         self.assertIn("Query result, computed exactly:", last)
-        self.assertIn("1. row 2: Tea | value 2", last)
+        self.assertIn("a | b\nTea | 2", last)
         self.assertIn("Total rows were left out.", last)
 
     def test_5b_question_without_query(self):
-        mock_ciu.STATE.plan_reply = '{"query_needed": false}'
+        mock_ciu.STATE.plan_reply = '{"sql_needed": false}'
         OFFICE.hook("prompt:What is in this table?")
         OFFICE.hook("press:ask")
         state = wait_done()
         self.assertEqual(state["answer"], "The selection has 3 rows. Total is =SUM(B2:B4).")
         self.assertIn("No query needed", mock_ciu.STATE.requests[-1]["messages"][-1]["content"])
 
-    def test_5c_bad_query_reported_to_model(self):
-        mock_ciu.STATE.plan_reply = json.dumps({"query_needed": True, "value": "Q * 2"})
-        OFFICE.hook("prompt:Double column Q")
+    def test_5c_model_fixes_failed_sql(self):
+        mock_ciu.STATE.plan_replies = [
+            json.dumps({"sql_needed": True, "sql": "SELECT item FROM t"}),
+            json.dumps({"sql_needed": True, "sql": "SELECT COUNT(*) FROM t"})]
+        OFFICE.hook("prompt:How many items?")
+        OFFICE.hook("press:ask")
+        state = wait_done()
+        self.assertIn("Computed with SQL: SELECT COUNT(*) FROM t", state["answer"])
+        first, retry, final = mock_ciu.STATE.requests
+        self.assertIn("That failed: SQLite error: no such column: item",
+                      retry["messages"][-1]["content"])
+        self.assertIn("COUNT(*)\n3", final["messages"][-1]["content"])
+
+    def test_5d_gives_up_after_second_failure(self):
+        mock_ciu.STATE.plan_reply = json.dumps({"sql_needed": True, "sql": "DELETE FROM t"})
+        OFFICE.hook("prompt:Remove everything")
         OFFICE.hook("press:ask")
         state = wait_done()
         self.assertFalse(state["busy"])
-        self.assertIn("The query could not be run: Column Q is outside the selection.",
+        self.assertEqual(len(mock_ciu.STATE.requests), 3)
+        self.assertIn("The query could not be run: SQLite error: not authorized",
                       mock_ciu.STATE.requests[-1]["messages"][-1]["content"])
+        self.assertEqual(self.sheet.getCellRangeByName("B2").getValue(), 2.0)
 
     def test_6a_propose_preview_apply(self):
         mock_ciu.STATE.plan_reply = json.dumps({

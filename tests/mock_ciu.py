@@ -17,6 +17,7 @@ class MockState(object):
         self.http_error = None
         self.max_prompt_chars = None
         self.plan_reply = '{"summary": "nothing", "operations": []}'
+        self.plan_replies = []  # used in order before plan_reply
         self.reject_response_format = False
         self.last_request = None
         self.requests = []
@@ -59,8 +60,9 @@ class Handler(BaseHTTPRequestHandler):
         if not req.get("stream"):
             if STATE.reject_response_format and "response_format" in req:
                 return self._json(400, {"error": {"message": "unsupported response_format"}})
+            content = STATE.plan_replies.pop(0) if STATE.plan_replies else STATE.plan_reply
             return self._json(200, {"choices": [{"message": {"role": "assistant",
-                                                             "content": STATE.plan_reply}}]})
+                                                             "content": content}}]})
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
