@@ -11,8 +11,19 @@ import urllib.request
 DEFAULT_BASE = "http://127.0.0.1:8674"
 
 
+CONTEXT_FULL_TYPES = ("ciu_context_full", "exceed_context_size_error")
+
+
 class CIUError(Exception):
     """A failure worth showing to the user as-is."""
+
+    def __init__(self, message, kind=None):
+        Exception.__init__(self, message)
+        self.kind = kind
+
+    @property
+    def context_full(self):
+        return self.kind in CONTEXT_FULL_TYPES
 
 
 class Status(object):
@@ -78,7 +89,7 @@ class CIUClient(object):
         try:
             resp = urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as e:
-            raise CIUError(_error_message(e))
+            raise _http_error(e)
         except (urllib.error.URLError, socket.timeout, ConnectionError, OSError) as e:
             raise CIUError("Could not reach CIU at %s (%s)." % (self.base, e))
 
@@ -154,7 +165,7 @@ class CIUClient(object):
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            raise CIUError(_error_message(e))
+            raise _http_error(e)
         except socket.timeout:
             raise CIUError("CIU stopped responding (timed out).")
         except (urllib.error.URLError, ConnectionError, OSError) as e:
@@ -163,15 +174,15 @@ class CIUClient(object):
             raise CIUError("Unexpected reply from CIU.")
 
 
-def _error_message(http_error):
+def _http_error(http_error):
     try:
         data = json.loads(http_error.read().decode("utf-8", "replace"))
-        err = data.get("error", data)
-        if isinstance(err, dict):
-            return err.get("message") or json.dumps(err)
-        return str(err)
     except Exception:
-        return "CIU returned HTTP %d." % http_error.code
+        return CIUError("CIU returned HTTP %d." % http_error.code)
+    err = data.get("error", data) if isinstance(data, dict) else data
+    if isinstance(err, dict):
+        return CIUError(err.get("message") or json.dumps(err), err.get("type"))
+    return CIUError(str(err))
 
 
 class ThinkFilter(object):

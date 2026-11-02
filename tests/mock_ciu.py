@@ -15,6 +15,7 @@ class MockState(object):
         self.chunk = 7
         self.delay = 0.0
         self.http_error = None
+        self.max_prompt_chars = None
         self.plan_reply = '{"summary": "nothing", "operations": []}'
         self.reject_response_format = False
         self.last_request = None
@@ -50,6 +51,11 @@ class Handler(BaseHTTPRequestHandler):
             code, msg = STATE.http_error
             STATE.http_error = None
             return self._json(code, {"error": {"message": msg}})
+        prompt_chars = sum(len(m.get("content", "")) for m in req.get("messages", []))
+        if STATE.max_prompt_chars and prompt_chars > STATE.max_prompt_chars:
+            return self._json(400, {"error": {
+                "message": "This conversation has filled the %d-token context." % STATE.n_ctx,
+                "type": "ciu_context_full", "n_ctx": STATE.n_ctx}})
         if not req.get("stream"):
             if STATE.reject_response_format and "response_format" in req:
                 return self._json(400, {"error": {"message": "unsupported response_format"}})

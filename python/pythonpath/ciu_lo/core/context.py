@@ -105,20 +105,32 @@ class ColumnProfile(object):
         self.top_repeats = sorted(((n, k) for k, n in seen.items() if n > 1),
                                   reverse=True)[:3]
         self.nums = nums
+        # Indexes into values, so callers can say which row holds an extreme.
+        self.ranked = sorted((i for i, v in enumerate(values) if is_num(v)),
+                             key=lambda i: float(values[i]))
         if nums:
             self.min, self.max = min(nums), max(nums)
             self.sum = math.fsum(nums)
             self.mean = self.sum / len(nums)
         else:
             self.min = self.max = self.sum = self.mean = None
+        self.where = None  # set by profile(): index -> "row N: label"
 
     def describe(self):
         bits = [self.kind]
         if self.missing:
             bits.append("%d missing" % self.missing)
         if self.kind == "number" or self.nums:
-            bits.append("min %s, max %s, sum %s, mean %s" % (
-                fmt(self.min), fmt(self.max), fmt(self.sum), fmt(self.mean)))
+            lo = hi = ""
+            if self.where and self.ranked:
+                lo = " (%s)" % self.where(self.ranked[0])
+                hi = " (%s)" % self.where(self.ranked[-1])
+            bits.append("min %s%s, max %s%s, sum %s, mean %s" % (
+                fmt(self.min), lo, fmt(self.max), hi, fmt(self.sum), fmt(self.mean)))
+            if self.where and len(self.ranked) >= 6:
+                top = [self.where(i, label_only=True) for i in reversed(self.ranked[-3:])]
+                low = [self.where(i, label_only=True) for i in self.ranked[:3]]
+                bits.append("highest: %s; lowest: %s" % (", ".join(top), ", ".join(low)))
         if self.kind != "empty":
             bits.append("%d unique" % self.unique)
         if self.duplicates:
@@ -141,6 +153,23 @@ def profile(snapshot):
             name = letter
         vals = [r[c] if c < len(r) else "" for r in body]
         profiles.append(ColumnProfile(c, name, vals))
+
+    # Rows are named by the first text column, so the model can answer
+    # "which row has the largest value" even when that row is not shown.
+    label_col = next((p.col_index for p in profiles if p.kind == "text"), None)
+    first_row = snapshot.start_row + (2 if header else 1)
+
+    def where(i, label_only=False):
+        row = body[i]
+        label = ""
+        if label_col is not None and label_col < len(row) and not is_empty(row[label_col]):
+            label = _cell_text(row[label_col], 30)
+        if label_only:
+            return label or "row %d" % (first_row + i)
+        return "row %d: %s" % (first_row + i, label) if label else "row %d" % (first_row + i)
+
+    for p in profiles:
+        p.where = where
     return header, profiles
 
 
@@ -161,8 +190,26 @@ def _cell_text(v, limit=40):
     return s if len(s) <= limit else s[:limit - 1] + "~"
 
 
-def render(snapshot, budget_chars=6000, max_formulas=25):
-    """Prompt text for the selection, at most budget_chars long."""
+def estimate_tokens(text):
+    """Conservative token count for Qwen-style tokenizers.
+
+    Digits are one token each, which is what made a character-based estimate
+    undercount numeric sheets by two to three times. Punctuation, tabs and
+    newlines count as one; letters as one per 3.5.
+    """
+    digits = letters = other = 0
+    for ch in text:
+        if ch.isdigit():
+            digits += 1
+        elif ch.isalpha():
+            letters += 1
+        elif ch != " ":
+            other += 1
+    return int(digits + other + letters / 3.5) + 1
+
+
+def render(snapshot, budget=2000, max_formulas=25, measure=estimate_tokens):
+    """Prompt text for the selection, at most budget as counted by measure."""
     header, profiles = profile(snapshot)
     lines = []
     lines.append("Document: %s" % snapshot.doc_title)
@@ -199,22 +246,27 @@ def render(snapshot, budget_chars=6000, max_formulas=25):
             lines.append("- ... %d more" % (len(formula_lines) - max_formulas))
 
     head = "\n".join(lines)
-    if len(head) > budget_chars:
-        return head[:budget_chars - 20].rstrip() + "\n[truncated]"
+    if measure(head) > budget:
+        marker = "[truncated]"
+        while lines and measure("\n".join(lines + [marker])) > budget:
+            lines.pop()
+        return "\n".join(lines + [marker]) if lines else marker[:budget]
 
-    remaining = budget_chars - len(head) - 80
+    footer = "[showing %d of %d rows]" % (snapshot.total_rows, snapshot.total_rows)
+    remaining = budget - measure(head) - measure(footer) - 2
     cols = "\t".join(col_letter(snapshot.start_col + c)
                      for c in range(len(profiles)))
     table = ["", "Cells (tab-separated):", "row\t" + cols]
-    used = sum(len(t) + 1 for t in table)
+    used = sum(measure(t) + 1 for t in table)
     shown = 0
     for r, row in enumerate(snapshot.rows):
         line = "%d\t%s" % (snapshot.start_row + r + 1,
                            "\t".join(_cell_text(v) for v in row))
-        if used + len(line) + 1 > remaining:
+        cost = measure(line) + 1
+        if used + cost > remaining:
             break
         table.append(line)
-        used += len(line) + 1
+        used += cost
         shown += 1
     if shown < snapshot.total_rows:
         table.append("[showing %d of %d rows]" % (shown, snapshot.total_rows))
@@ -223,7 +275,8 @@ def render(snapshot, budget_chars=6000, max_formulas=25):
 
 def summary_line(snapshot):
     """One line for the dialog: what CIU will see."""
-    s = "%s!%s, %d x %d" % (snapshot.sheet, snapshot.range_ref(),
+    sheet = snapshot.sheet if len(snapshot.sheet) <= 24 else snapshot.sheet[:23] + "~"
+    s = "%s!%s, %d x %d" % (sheet, snapshot.range_ref(),
                             snapshot.total_rows, snapshot.total_cols)
     if snapshot.scope_note:
         s += " (%s)" % snapshot.scope_note

@@ -67,7 +67,7 @@ class Analysis(unittest.TestCase):
 
 class Rendering(unittest.TestCase):
     def test_contains_key_parts(self):
-        out = context.render(sales_snapshot(), budget_chars=4000)
+        out = context.render(sales_snapshot(), budget=4000)
         self.assertIn("Sheet: Sales", out)
         self.assertIn("Range: A1:C5", out)
         self.assertIn("B (Revenue)", out)
@@ -76,11 +76,12 @@ class Rendering(unittest.TestCase):
 
     def test_budget_is_respected_for_many_sizes(self):
         big = sales_snapshot(1500)
-        for budget in (300, 800, 2000, 6000, 20000):
-            self.assertLessEqual(len(context.render(big, budget_chars=budget)), budget)
+        for budget in (100, 300, 800, 2000, 6000):
+            self.assertLessEqual(context.estimate_tokens(context.render(big, budget=budget)), budget)
+            self.assertLessEqual(len(context.render(big, budget=budget, measure=len)), budget)
 
     def test_truncation_reported(self):
-        out = context.render(sales_snapshot(1500), budget_chars=2000)
+        out = context.render(sales_snapshot(1500), budget=600)
         self.assertRegex(out, r"\[showing \d+ of 1501 rows\]")
 
     def test_partial_read_noted(self):
@@ -100,14 +101,63 @@ class Rendering(unittest.TestCase):
         self.assertNotIn("x" * 100, out)
 
 
+def countries_snapshot(n=238):
+    rows = [["Country", "Population 2022", "Population 2023", "Change", "Region"]]
+    for i in range(n):
+        pop = 1000.0 + (i * 7919) % 50000000
+        rows.append(["Country %03d" % i, pop, pop * 1.01, "+1.00%", "Europe"])
+    rows[100] = ["China", 1425887337.0, 1425671352.0, "-0.02%", "Asia"]
+    rows[90] = ["India", 1417173173.0, 1428627663.0, "+0.81%", "Asia"]
+    rows[200] = ["Tuvalu", 11312.0, 11396.0, "+0.74%", "Oceania"]
+    rows[201] = ["Tokelau", 900.0, 910.0, "+1.11%", "Oceania"]
+    return context.Snapshot("list.xlsx", "Countries", 0, 0, rows)
+
+
+class Tokens(unittest.TestCase):
+    def test_digits_count_one_each(self):
+        self.assertGreaterEqual(context.estimate_tokens("1425887337"), 10)
+        self.assertGreaterEqual(context.estimate_tokens("40578842\t2827608"), 16)
+
+    def test_never_below_digit_and_symbol_count(self):
+        text = "row\tA\tB\n2\t40578842\t+1.65%\n3\t2827608\t-0.44%"
+        floor = sum(1 for ch in text if not ch.isalpha() and ch != " ")
+        self.assertGreaterEqual(context.estimate_tokens(text), floor)
+
+    def test_numeric_sheet_fits_4k(self):
+        """The case that overflowed: a sheet of large integers at 4096."""
+        msgs, max_tokens = prompts.build_messages(countries_snapshot(), "most populated?", 4096)
+        text = "".join(m["content"] for m in msgs)
+        digits = sum(ch.isdigit() for ch in text)
+        self.assertLess(digits + max_tokens, 4096)
+
+
+class Extremes(unittest.TestCase):
+    def test_min_max_name_their_rows(self):
+        out = context.render(countries_snapshot(), budget=1500)
+        self.assertIn("max 1425887337 (row 101: China)", out)
+        self.assertIn("highest: China, India,", out)
+        self.assertIn("min 900 (row 202: Tokelau)", out)
+        self.assertIn("lowest: Tokelau,", out)
+
+    def test_extremes_survive_when_rows_do_not(self):
+        out = context.render(countries_snapshot(), budget=700)
+        self.assertNotIn("\tChina\t", out)
+        self.assertIn("China", out)
+
+    def test_no_label_column_falls_back_to_row(self):
+        rows = [["A", "B"]] + [[float(i), float(i * 2)] for i in range(10)]
+        out = context.render(context.Snapshot("d", "S", 0, 0, rows))
+        self.assertIn("max 9 (row 11)", out)
+        self.assertIn("highest: row 11, row 10, row 9", out)
+
+
 class Prompts(unittest.TestCase):
     def test_fits_context_window(self):
         big = sales_snapshot(3000)
         for n_ctx in (2048, 4096, 8192, 32768):
             msgs, max_tokens = prompts.build_messages(big, "Summarise", n_ctx)
-            chars = sum(len(m["content"]) for m in msgs)
-            est_tokens = chars / prompts.CHARS_PER_TOKEN
-            self.assertLess(est_tokens + max_tokens, n_ctx, n_ctx)
+            used = sum(context.estimate_tokens(m["content"]) for m in msgs)
+            self.assertLess(used + max_tokens, n_ctx, n_ctx)
 
     def test_missing_n_ctx_uses_default(self):
         msgs, max_tokens = prompts.build_messages(sales_snapshot(), "q", None)

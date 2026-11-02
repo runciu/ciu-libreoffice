@@ -215,8 +215,10 @@ class AssistantDialog(object):
                 self.ui.post(lambda: self._show_answer(status.describe()))
                 return
             self.ui.post(lambda: self._show_answer("Working out the change..."))
-            messages, max_tokens = prompts.build_action_messages(snap, request, status.n_ctx)
-            raw = self.client.chat_json(messages, PLAN_SCHEMA, max_tokens=max_tokens)
+            raw = self._fit_and_send(
+                lambda scale: prompts.build_action_messages(snap, request, status.n_ctx, scale),
+                lambda messages, max_tokens: self.client.chat_json(
+                    messages, PLAN_SCHEMA, max_tokens=max_tokens))
             if self.stop_event.is_set():
                 self.ui.post(lambda: self._show_answer("Stopped. Nothing was changed."))
                 return
@@ -244,10 +246,11 @@ class AssistantDialog(object):
             if not status.ready:
                 self.ui.post(lambda: self._show_answer(status.describe()))
                 return
-            messages, max_tokens = prompts.build_messages(snap, question, status.n_ctx)
-            self.client.chat_stream(messages, on_delta=self.ui.post_text,
-                                    should_stop=self.stop_event.is_set,
-                                    max_tokens=max_tokens)
+            self._fit_and_send(
+                lambda scale: prompts.build_messages(snap, question, status.n_ctx, scale),
+                lambda messages, max_tokens: self.client.chat_stream(
+                    messages, on_delta=self.ui.post_text,
+                    should_stop=self.stop_event.is_set, max_tokens=max_tokens))
             if self.stop_event.is_set():
                 self.ui.post(lambda: self._append_answer("\n[stopped]"))
         except CIUError as e:
@@ -258,6 +261,18 @@ class AssistantDialog(object):
             self.ui.post(lambda: self._append_answer("\nUnexpected error:\n" + tb))
         finally:
             self.ui.post(lambda: self._set_busy(False))
+
+    def _fit_and_send(self, build, send):
+        """Send with a smaller selection each time the server reports the
+        context as full. The request fails before any text is streamed, so a
+        retry never shows a partial answer twice."""
+        for i, scale in enumerate(prompts.RETRY_SCALES):
+            messages, max_tokens = build(scale)
+            try:
+                return send(messages, max_tokens)
+            except CIUError as e:
+                if not e.context_full or i == len(prompts.RETRY_SCALES) - 1:
+                    raise
 
     def _check_status(self):
         def work():

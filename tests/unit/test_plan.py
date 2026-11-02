@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "..", "python", "pythonpath"))
 sys.path.insert(0, os.path.join(HERE, ".."))
 
 from ciu_lo.core import plan as P, prompts, context
-from ciu_lo.core.ciu_client import CIUClient
+from ciu_lo.core.ciu_client import CIUClient, CIUError
 import mock_ciu
 
 
@@ -126,8 +126,8 @@ class ActionPrompt(unittest.TestCase):
         snap = context.Snapshot("d", "S", 0, 0, rows, hints=["First empty column to the right: G"])
         for n_ctx in (2048, 4096, 8192):
             msgs, max_tokens = prompts.build_action_messages(snap, "add a total column", n_ctx)
-            chars = sum(len(m["content"]) for m in msgs)
-            self.assertLess(chars / prompts.CHARS_PER_TOKEN + max_tokens, n_ctx)
+            used = sum(context.estimate_tokens(m["content"]) for m in msgs)
+            self.assertLess(used + max_tokens, n_ctx)
             self.assertIn("First empty column to the right: G", msgs[1]["content"])
 
     def test_example_in_prompt_is_itself_a_valid_plan(self):
@@ -154,6 +154,13 @@ class ClientJson(unittest.TestCase):
         self.assertEqual(out, '{"summary": "x", "operations": []}')
         rf = mock_ciu.STATE.last_request["response_format"]
         self.assertEqual(rf["json_schema"]["schema"], P.PLAN_SCHEMA)
+
+    def test_context_full_is_recognised(self):
+        mock_ciu.STATE.max_prompt_chars = 10
+        with self.assertRaises(CIUError) as cm:
+            self.client.chat_json([{"role": "user", "content": "a long question"}], P.PLAN_SCHEMA)
+        self.assertTrue(cm.exception.context_full)
+        self.assertIn("4096-token context", str(cm.exception))
 
     def test_falls_back_without_response_format(self):
         mock_ciu.STATE.reject_response_format = True

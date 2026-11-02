@@ -110,6 +110,35 @@ class Extension(unittest.TestCase):
         state = wait_done()
         self.assertIn("4096-token context", state["answer"])
 
+    def test_6_context_full_retries_with_fewer_rows(self):
+        big = self.sheet.getCellRangeByName("H1:J300")
+        big.setDataArray([("Name", "A", "B")] + [("n%d" % i, float(i * 123457), float(i)) for i in range(299)])
+        ctrl = self.doc.getCurrentController()
+        ctrl.select(big)
+        self.addCleanup(lambda: (big.clearContents(1 | 4),
+                                 ctrl.select(self.sheet.getCellRangeByName("A1:B5"))))
+
+        def measure():
+            OFFICE.hook("press:quick:0")
+            return wait_done()
+        mock_ciu.STATE.max_prompt_chars = None
+        measure()
+        full = sum(len(m["content"]) for m in mock_ciu.STATE.last_request["messages"])
+        mock_ciu.STATE.__init__()
+        mock_ciu.STATE.max_prompt_chars = full - 1
+        state = measure()
+        self.assertEqual(state["answer"], "The selection has 3 rows. Total is =SUM(B2:B4).")
+        sizes = [sum(len(m["content"]) for m in r["messages"]) for r in mock_ciu.STATE.requests]
+        self.assertEqual(len(sizes), 2)
+        self.assertLess(sizes[1], sizes[0])
+
+    def test_6_context_full_gives_up_after_retries(self):
+        mock_ciu.STATE.max_prompt_chars = 10
+        OFFICE.hook("press:quick:0")
+        state = wait_done()
+        self.assertIn("4096-token context", state["answer"])
+        self.assertEqual(len(mock_ciu.STATE.requests), 3)
+
     def test_6a_propose_preview_apply(self):
         mock_ciu.STATE.plan_reply = json.dumps({
             "summary": "Add VAT column.", "operations": [

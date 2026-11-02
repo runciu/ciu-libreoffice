@@ -17,10 +17,14 @@ SYSTEM = (
     "- Be concise and plain. No preamble."
 )
 
-CHARS_PER_TOKEN = 3.2
 DEFAULT_N_CTX = 4096
-MIN_CONTEXT_CHARS = 800
-MAX_CONTEXT_CHARS = 24000
+MIN_CONTEXT_TOKENS = 200
+MAX_CONTEXT_TOKENS = 8000
+SAFETY = 0.9
+
+# Applied to the selection budget on successive attempts if the server still
+# reports the context as full (a tokenizer that counts differently).
+RETRY_SCALES = (1.0, 0.5, 0.25)
 
 
 def answer_tokens(n_ctx):
@@ -28,23 +32,26 @@ def answer_tokens(n_ctx):
     return max(256, min(1024, int(n_ctx * 0.25)))
 
 
-def context_budget(n_ctx, question, max_tokens):
-    """Characters available for the selection description."""
+def context_budget(n_ctx, system, request, max_tokens, scale=1.0):
+    """Tokens available for the selection description."""
     n_ctx = n_ctx or DEFAULT_N_CTX
-    overhead_tokens = (len(SYSTEM) + len(question)) / CHARS_PER_TOKEN + 60
-    free = n_ctx - max_tokens - overhead_tokens
-    chars = int(free * CHARS_PER_TOKEN * 0.9)
-    return max(MIN_CONTEXT_CHARS, min(MAX_CONTEXT_CHARS, chars))
+    overhead = ctxmod.estimate_tokens(system) + ctxmod.estimate_tokens(request) + 80
+    free = (n_ctx - max_tokens - overhead) * SAFETY * scale
+    return int(max(MIN_CONTEXT_TOKENS, min(MAX_CONTEXT_TOKENS, free)))
 
 
-def build_messages(snapshot, question, n_ctx):
+def _messages(system, snapshot, request, budget):
+    block = ctxmod.render(snapshot, budget=budget)
+    user = "Selection:\n%s\n\nRequest: %s" % (block, request.strip())
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": user}]
+
+
+def build_messages(snapshot, question, n_ctx, scale=1.0):
     """Returns (messages, max_tokens)."""
     max_tokens = answer_tokens(n_ctx or DEFAULT_N_CTX)
-    budget = context_budget(n_ctx, question, max_tokens)
-    block = ctxmod.render(snapshot, budget_chars=budget)
-    user = "Selection:\n%s\n\nRequest: %s" % (block, question.strip())
-    return [{"role": "system", "content": SYSTEM},
-            {"role": "user", "content": user}], max_tokens
+    budget = context_budget(n_ctx, SYSTEM, question, max_tokens, scale)
+    return _messages(SYSTEM, snapshot, question, budget), max_tokens
 
 
 ACTION_SYSTEM = (
@@ -78,17 +85,12 @@ ACTION_SYSTEM = (
 )
 
 
-def build_action_messages(snapshot, request, n_ctx):
+def build_action_messages(snapshot, request, n_ctx, scale=1.0):
     """Returns (messages, max_tokens) for a change request."""
     n_ctx = n_ctx or DEFAULT_N_CTX
     max_tokens = max(256, min(800, int(n_ctx * 0.2)))
-    overhead = (len(ACTION_SYSTEM) + len(request)) / CHARS_PER_TOKEN + 60
-    free = n_ctx - max_tokens - overhead
-    budget = max(MIN_CONTEXT_CHARS, min(MAX_CONTEXT_CHARS, int(free * CHARS_PER_TOKEN * 0.9)))
-    block = ctxmod.render(snapshot, budget_chars=budget)
-    user = "Selection:\n%s\n\nRequest: %s" % (block, request.strip())
-    return [{"role": "system", "content": ACTION_SYSTEM},
-            {"role": "user", "content": user}], max_tokens
+    budget = context_budget(n_ctx, ACTION_SYSTEM, request, max_tokens, scale)
+    return _messages(ACTION_SYSTEM, snapshot, request, budget), max_tokens
 
 
 QUICK_ACTIONS = [
