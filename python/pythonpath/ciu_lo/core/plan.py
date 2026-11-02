@@ -13,6 +13,8 @@ import re
 from .context import col_letter
 
 TOOLS = ("set_formula", "fill_formula", "set_values")
+SHEET_TOOL = "sql_to_sheet"
+DEFAULT_SHEET = "Cleaned"
 MAX_OPS = 6
 MAX_CELLS = 5000
 MAX_FORMULA_LEN = 600
@@ -24,30 +26,34 @@ DENIED_FUNCTIONS = ("WEBSERVICE", "FILTERXML", "DDE", "HYPERLINK", "INFO",
 _EXTERNAL_REF = re.compile(r"'[^']*'\s*#")
 _LOCATION = re.compile(r"[a-z][a-z0-9+.\-]*://|\bfile:|\\\\|\bwww\.", re.I)
 
-PLAN_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "summary": {"type": "string"},
-        "operations": {
-            "type": "array",
-            "minItems": 0,
-            "maxItems": MAX_OPS,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "tool": {"type": "string", "enum": list(TOOLS)},
-                    "target": {"type": "string"},
-                    "formula": {"type": "string"},
-                    "values": {"type": "array",
-                               "items": {"type": "array",
-                                         "items": {"type": ["string", "number"]}}},
-                },
-                "required": ["tool", "target"],
-            },
+def plan_schema(sql=False):
+    tools = list(TOOLS) + ([SHEET_TOOL] if sql else [])
+    op = {
+        "type": "object",
+        "properties": {
+            "tool": {"type": "string", "enum": tools},
+            "target": {"type": "string"},
+            "formula": {"type": "string"},
+            "values": {"type": "array",
+                       "items": {"type": "array",
+                                 "items": {"type": ["string", "number"]}}},
         },
-    },
-    "required": ["summary", "operations"],
-}
+        "required": ["tool"],
+    }
+    if sql:
+        op["properties"]["sql"] = {"type": "string"}
+        op["properties"]["sheet"] = {"type": "string"}
+    return {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string"},
+            "operations": {"type": "array", "minItems": 0, "maxItems": MAX_OPS, "items": op},
+        },
+        "required": ["summary", "operations"],
+    }
+
+
+PLAN_SCHEMA = plan_schema()
 
 
 class PlanError(Exception):
@@ -55,19 +61,26 @@ class PlanError(Exception):
 
 
 class Operation(object):
-    def __init__(self, tool, target, formula=None, values=None):
+    def __init__(self, tool, target, formula=None, values=None, sql=None, sheet=None):
         self.tool = tool
         self.target = target
         self.formula = formula
         self.values = values
-        self.box = parse_range(target)  # (c0, r0, c1, r1), 0-based
+        self.sql = sql
+        self.sheet = sheet
+        # (c0, r0, c1, r1), 0-based; a new sheet has no target on this one.
+        self.box = None if tool == SHEET_TOOL else parse_range(target)
 
     @property
     def n_cells(self):
+        if self.box is None:
+            return 0
         c0, r0, c1, r1 = self.box
         return (c1 - c0 + 1) * (r1 - r0 + 1)
 
     def describe(self):
+        if self.tool == SHEET_TOOL:
+            return "New sheet '%s' from: %s" % (self.sheet, self.sql)
         if self.tool == "set_formula":
             return "%s: %s" % (self.target, self.formula)
         if self.tool == "fill_formula":
@@ -215,7 +228,7 @@ def extract_json(text):
     raise PlanError("The plan was cut off before it finished.")
 
 
-def parse_plan(text, sheet=None):
+def parse_plan(text, sheet=None, allow_sql=False):
     data = extract_json(text)
     if not isinstance(data, dict):
         raise PlanError("The plan must be a JSON object.")
@@ -230,12 +243,15 @@ def parse_plan(text, sheet=None):
         if not isinstance(raw, dict):
             raise PlanError("Operation %d is not an object." % i)
         tool = raw.get("tool")
-        if tool not in TOOLS:
+        if tool not in TOOLS and not (allow_sql and tool == SHEET_TOOL):
             raise PlanError("Operation %d: unknown tool %r." % (i, tool))
         op = Operation(tool, str(raw.get("target", "")),
-                       formula=raw.get("formula"), values=raw.get("values"))
+                       formula=raw.get("formula"), values=raw.get("values"),
+                       sql=raw.get("sql"), sheet=raw.get("sheet"))
         _check_op(i, op)
         ops.append(op)
+    if any(op.tool == SHEET_TOOL for op in ops) and len(ops) > 1:
+        raise PlanError("A new-sheet operation must be the only operation in a plan.")
 
     plan = Plan(str(data.get("summary") or "").strip(), ops, sheet=sheet)
     if plan.n_cells > MAX_CELLS:
@@ -244,7 +260,19 @@ def parse_plan(text, sheet=None):
     return plan
 
 
+def sheet_name(name):
+    """A valid, readable sheet name from what the model suggested."""
+    name = re.sub(r"[\[\]*?:/\\']", "", str(name or "")).strip()[:31].strip()
+    return name or DEFAULT_SHEET
+
+
 def _check_op(i, op):
+    if op.tool == SHEET_TOOL:
+        if not isinstance(op.sql, str) or not op.sql.strip():
+            raise PlanError("Operation %d: sql_to_sheet needs SQL." % i)
+        op.sql = op.sql.strip().rstrip(";").strip()
+        op.sheet = sheet_name(op.sheet)
+        return
     c0, r0, c1, r1 = op.box
     if op.tool == "set_formula":
         if op.n_cells != 1:
@@ -273,9 +301,10 @@ def _check_op(i, op):
 
 
 def _check_overlaps(ops):
-    for a in range(len(ops)):
-        for b in range(a + 1, len(ops)):
-            x, y = ops[a].box, ops[b].box
+    boxed = [op for op in ops if op.box is not None]
+    for a in range(len(boxed)):
+        for b in range(a + 1, len(boxed)):
+            x, y = boxed[a].box, boxed[b].box
             if x[0] <= y[2] and y[0] <= x[2] and x[1] <= y[3] and y[1] <= x[3]:
                 raise PlanError("Operations %d and %d write to the same cells." % (a + 1, b + 1))
 

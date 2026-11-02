@@ -73,13 +73,13 @@ def apply(doc, plan, expected_occupied):
             _write(sheet, op)
     except Exception as e:
         um.leaveUndoContext()
-        um.undo()
+        _rollback(um, title)
         return ApplyResult(False, "Could not write the change, nothing was kept: %s" % e)
     um.leaveUndoContext()
 
     bad, warn = _check_errors(sheet, plan)
     if bad:
-        um.undo()
+        _rollback(um, title)
         lines = ["Calc rejected the formula, so nothing was changed:"]
         lines += ["  %s: %s" % (ref, why) for ref, why in bad[:8]]
         return ApplyResult(False, "\n".join(lines))
@@ -91,6 +91,58 @@ def apply(doc, plan, expected_occupied):
     if len(warn) > 8:
         warnings.append("... and %d more" % (len(warn) - 8))
     return ApplyResult(True, msg, warnings)
+
+
+def _rollback(um, title):
+    """Undo our own step only. An undo context with no changes never reaches
+    the undo stack, so a blind undo() would revert the user's previous edit."""
+    if um.isUndoPossible() and um.getCurrentUndoActionTitle() == title:
+        um.undo()
+
+
+def unique_sheet_name(doc, wanted):
+    sheets = doc.getSheets()
+    if not sheets.hasByName(wanted):
+        return wanted
+    n = 2
+    while sheets.hasByName("%s %d" % (wanted, n)):
+        n += 1
+    return "%s %d" % (wanted, n)
+
+
+def apply_sheet(doc, wanted_name, result, source_sheet):
+    """Write a SheetResult to a new sheet after the source sheet. Undoing
+    removes the new sheet in one step; the source sheet is never written."""
+    values = result.values()
+    width = len(values[0])
+    sheets = doc.getSheets()
+    name = unique_sheet_name(doc, wanted_name)
+    position = sheets.getCount()
+    for i, existing in enumerate(sheets.getElementNames()):
+        if existing == source_sheet:
+            position = i + 1
+    um = doc.getUndoManager()
+    title = "CIU: new sheet " + name
+    um.enterUndoContext(title)
+    try:
+        sheets.insertNewByName(name, position)
+        new = sheets.getByName(name)
+        # Bulk write: fast, and undo stays correct because undoing the sheet
+        # insertion removes the whole sheet, contents included.
+        new.getCellRangeByPosition(0, 0, width - 1, len(values) - 1).setDataArray(values)
+    except Exception as e:
+        um.leaveUndoContext()
+        _rollback(um, title)
+        return ApplyResult(False, "Could not create the new sheet, nothing was kept: %s" % e)
+    um.leaveUndoContext()
+    try:
+        doc.getCurrentController().setActiveSheet(new)
+    except Exception:
+        pass
+    n = len(values) - 1
+    return ApplyResult(True, "Created sheet '%s' with %d row%s. Your original sheet is "
+                             "unchanged. Ctrl+Z (Cmd+Z) removes the new sheet."
+                       % (name, n, "" if n == 1 else "s"))
 
 
 def _write(sheet, op):

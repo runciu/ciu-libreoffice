@@ -79,6 +79,7 @@ def detect_header(rows):
     return not any(str(v) in body_vals for v in non_empty) and len(non_empty) == len(first)
 
 
+NA_MARKERS = ("n/a", "na", "#n/a", "-", "--", "null", "none", "nan", "?", "missing")
 TOTAL_LABELS = ("total", "totals", "grand total", "sum", "world", "all", "overall")
 TOTAL_TOLERANCE = 0.03
 
@@ -109,6 +110,11 @@ class ColumnProfile(object):
         self.duplicates = sum(n - 1 for n in seen.values() if n > 1)
         self.top_repeats = sorted(((n, k) for k, n in seen.items() if n > 1),
                                   reverse=True)[:3]
+        markers = {}
+        for v in filled:
+            if isinstance(v, str) and v.strip().lower() in NA_MARKERS:
+                markers[v.strip()] = markers.get(v.strip(), 0) + 1
+        self.na_markers = markers
         self.nums = nums
         # Indexes into values, so callers can say which row holds an extreme.
         self.ranked = sorted((i for i in kept if is_num(values[i])),
@@ -125,6 +131,10 @@ class ColumnProfile(object):
         bits = [self.kind]
         if self.missing:
             bits.append("%d missing" % self.missing)
+        if self.na_markers:
+            bits.append("%d look like missing-value markers (%s)" % (
+                sum(self.na_markers.values()),
+                ", ".join("%r x%d" % (k, n) for k, n in sorted(self.na_markers.items()))))
         if self.kind == "number" or self.nums:
             lo = hi = ""
             if self.where and self.ranked:

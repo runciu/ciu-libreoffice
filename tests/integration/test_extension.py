@@ -190,6 +190,46 @@ class Extension(unittest.TestCase):
                       mock_ciu.STATE.requests[-1]["messages"][-1]["content"])
         self.assertEqual(self.sheet.getCellRangeByName("B2").getValue(), 2.0)
 
+    def test_5e_clean_into_new_sheet(self):
+        sql = ("SELECT a, b FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY LOWER(a) "
+               "ORDER BY row) AS n FROM t) WHERE n = 1 ORDER BY row")
+        mock_ciu.STATE.plan_reply = json.dumps({"summary": "Remove duplicate items.", "operations": [
+            {"tool": "sql_to_sheet", "sql": sql, "sheet": "Cleaned"}]})
+        before = self.sheet.getCellRangeByName("A1:B5").getFormulaArray()
+        OFFICE.hook("prompt:remove duplicates into a new sheet")
+        OFFICE.hook("press:change")
+        state = wait_done()
+        self.assertIn("sql_to_sheet", mock_ciu.STATE.last_request["messages"][0]["content"])
+        self.assertIn("New sheet 'Cleaned': 3 rows x 2 columns, from 4 source rows (1 left out).",
+                      state["answer"])
+        self.assertIn("Item | Cost\nTea | 2\nMilk | 1.5", state["answer"])
+        self.assertIn("This sheet is not changed.", state["answer"])
+        self.assertEqual(state["apply_label"], "Create sheet")
+        self.assertEqual(self.doc.getSheets().getCount(), 1)
+
+        OFFICE.hook("press:apply")
+        state = json.loads(OFFICE.hook("poll"))
+        self.assertIn("Created sheet 'Cleaned' with 3 rows", state["answer"])
+        new = self.doc.getSheets().getByName("Cleaned")
+        self.assertEqual(new.getCellRangeByName("A1:B4").getDataArray(),
+                         (("Item", "Cost"), ("Tea", 2.0), ("Milk", 1.5), ("", 5.5)))
+        self.assertEqual(self.sheet.getCellRangeByName("A1:B5").getFormulaArray(), before)
+        self.doc.getUndoManager().undo()
+        self.assertEqual(self.doc.getSheets().getCount(), 1)
+        self.doc.getCurrentController().setActiveSheet(self.sheet)
+        self.doc.getCurrentController().select(self.sheet.getCellRangeByName("A1:B5"))
+
+    def test_5f_bad_sheet_sql_reported(self):
+        mock_ciu.STATE.plan_reply = json.dumps({"summary": "x", "operations": [
+            {"tool": "sql_to_sheet", "sql": "DROP TABLE t"}]})
+        OFFICE.hook("prompt:clean it")
+        OFFICE.hook("press:change")
+        state = wait_done()
+        self.assertIn("CIU's SQL could not be used, so nothing was changed:", state["answer"])
+        self.assertIn("not authorized", state["answer"])
+        self.assertFalse(state["pending"])
+        self.assertEqual(self.doc.getSheets().getCount(), 1)
+
     def test_6a_propose_preview_apply(self):
         mock_ciu.STATE.plan_reply = json.dumps({
             "summary": "Add VAT column.", "operations": [

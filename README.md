@@ -25,6 +25,8 @@ If LibreOffice's Python has no SQLite, a simpler built-in query form is used ins
 | `fill_formula` | a formula filled down a column or across a row, like dragging the fill handle |
 | `set_values` | plain text or numbers in a range |
 
+**Clean into a new sheet.** Ask for things like "remove duplicate countries", "drop rows with missing values", or "a table of total population per region". CIU writes one SQL `SELECT` (in the same sandbox as Ask), and the result goes to a **new sheet**. The original sheet is never changed. The preview shows how many rows are kept and left out, the SQL, and the first rows. **Create sheet** adds the new sheet next to the original, and one undo removes it again. The original column headers are kept, and text such as `N/A` or `-` is reported in the statistics as a possible missing value, so "drop missing values" can catch it.
+
 Before anything is written, the plan is checked:
 - Targets must be valid addresses on the current sheet, and operations may not overlap. A plan can have at most 6 operations and 5,000 cells.
 - Formulas are normalised to LibreOffice syntax. Formulas with unbalanced quotes or brackets are refused.

@@ -123,12 +123,18 @@ ACTION_SYSTEM = (
 )
 
 
-def build_action_messages(snapshot, request, n_ctx, scale=1.0):
-    """Returns (messages, max_tokens) for a change request."""
+def build_action_messages(snapshot, request, n_ctx, scale=1.0, sql=None):
+    """Returns (messages, max_tokens) for a change request. With the sql
+    module, the new-sheet tool is offered as well."""
     n_ctx = n_ctx or DEFAULT_N_CTX
     max_tokens = max(256, min(800, int(n_ctx * 0.2)))
-    budget = context_budget(n_ctx, ACTION_SYSTEM, request, max_tokens, scale)
-    return _messages(ACTION_SYSTEM, snapshot, request, budget), max_tokens
+    system = ACTION_SYSTEM
+    if sql is not None:
+        marker = "Rules:\n"
+        system = system.replace(marker, sql.sheet_instructions(ctxmod.Table(snapshot)) +
+                                "\n" + marker, 1)
+    budget = context_budget(n_ctx, system, request, max_tokens, scale)
+    return _messages(system, snapshot, request, budget), max_tokens
 
 
 QUICK_ACTIONS = [

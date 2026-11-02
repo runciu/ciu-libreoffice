@@ -13,7 +13,9 @@ from ..calc import executor, reader
 from ..core import prompts
 from ..core import engine as enginemod
 from ..core.query import QueryError
-from ..core.plan import PLAN_SCHEMA, PlanError, parse_plan
+from ..core import sql as sqlmod
+from ..core.context import Table
+from ..core.plan import SHEET_TOOL, PlanError, parse_plan, plan_schema
 from ..core.ciu_client import CIUClient, CIUError
 from ..core.context import summary_line
 from .mainthread import MainThread
@@ -200,9 +202,13 @@ class AssistantDialog(object):
     def apply_pending(self):
         if not self.pending or self.busy:
             return
-        plan, occupied = self.pending
+        plan, detail = self.pending
         self._clear_pending()
-        result = executor.apply(self._model_doc(), plan, occupied)
+        if plan.operations[0].tool == SHEET_TOOL:
+            result = executor.apply_sheet(self._model_doc(), plan.operations[0].sheet, detail,
+                                          plan.sheet)
+        else:
+            result = executor.apply(self._model_doc(), plan, detail)
         text = result.message
         if result.warnings:
             text += "\n\nCheck these cells:\n" + "\n".join("  " + w for w in result.warnings)
@@ -217,21 +223,23 @@ class AssistantDialog(object):
                 self.ui.post(lambda: self._show_answer(status.describe()))
                 return
             self.ui.post(lambda: self._show_answer("Working out the change..."))
+            sql = sqlmod if sqlmod.AVAILABLE else None
             raw = self._fit_and_send(
-                lambda scale: prompts.build_action_messages(snap, request, status.n_ctx, scale),
+                lambda scale: prompts.build_action_messages(snap, request, status.n_ctx,
+                                                            scale, sql=sql),
                 lambda messages, max_tokens: self.client.chat_json(
-                    messages, PLAN_SCHEMA, max_tokens=max_tokens))
+                    messages, plan_schema(sql=sql is not None), max_tokens=max_tokens))
             if self.stop_event.is_set():
                 self.ui.post(lambda: self._show_answer("Stopped. Nothing was changed."))
                 return
             try:
-                plan = parse_plan(raw, sheet=snap.sheet)
+                plan = parse_plan(raw, sheet=snap.sheet, allow_sql=sql is not None)
             except PlanError as e:
                 msg = str(e)
                 self.ui.post(lambda: self._show_answer(
                     "CIU's proposal could not be used, so nothing was changed:\n" + msg))
                 return
-            self.ui.post(lambda: self._show_plan(plan))
+            self.ui.post(lambda: self._show_plan(plan, snap))
         except CIUError as e:
             msg = str(e)
             self.ui.post(lambda: self._show_answer(msg))
@@ -339,10 +347,13 @@ class AssistantDialog(object):
         except Exception:
             pass
 
-    def _show_plan(self, plan):
+    def _show_plan(self, plan, snap=None):
         """Preview. Runs on the main thread, so it can look at the sheet."""
         if not plan.operations:
             self._show_answer("CIU did not propose a change:\n" + (plan.summary or "no reason given"))
+            return
+        if plan.operations[0].tool == SHEET_TOOL:
+            self._show_sheet_plan(plan, snap)
             return
         try:
             occupied = executor.occupied_cells(executor.get_sheet(self._model_doc(), plan.sheet), plan)
@@ -363,6 +374,32 @@ class AssistantDialog(object):
         self.pending = (plan, occupied)
         self.dm.getByName("btnApply").Label = (
             "Apply (overwrite %d)" % len(occupied) if occupied else "Apply")
+        self._refresh_buttons()
+
+    def _show_sheet_plan(self, plan, snap):
+        op = plan.operations[0]
+        try:
+            table = Table(reader.read_full(self._model_doc(), snap))
+            result = sqlmod.run_to_sheet(op.sql, table)
+        except (QueryError, reader.SelectionError) as e:
+            self._show_answer("CIU's SQL could not be used, so nothing was changed:\n%s\n\nSQL: %s"
+                              % (e, op.sql))
+            return
+        kept, source = len(result.rows), result.source_rows
+        lines = ["Proposed change (not applied yet):", plan.summary or "Create a new sheet.", "",
+                 "New sheet '%s': %d row%s x %d column%s, from %d source rows (%s)."
+                 % (op.sheet, kept, "" if kept == 1 else "s", len(result.headers),
+                    "" if len(result.headers) == 1 else "s", source,
+                    "%d left out" % (source - kept) if kept <= source else "%d added" % (kept - source)),
+                 "SQL: %s" % op.sql, "", "First rows:", " | ".join(_clip(h, 24) for h in result.headers)]
+        for row in result.values()[1:6]:
+            lines.append(" | ".join(_clip(sqlmod.format_cell(v) if v != "" else "-", 24) for v in row))
+        if kept > 5:
+            lines.append("...")
+        lines += ["", "This sheet is not changed. Click Apply to create the new sheet, or Discard."]
+        self._show_answer("\n".join(lines))
+        self.pending = (plan, result)
+        self.dm.getByName("btnApply").Label = "Create sheet"
         self._refresh_buttons()
 
     def _clear_pending(self):

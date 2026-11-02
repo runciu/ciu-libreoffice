@@ -25,6 +25,8 @@ except ImportError:
 NAME = "SQL"
 MAX_ROWS = 20
 TIME_LIMIT = 2.0
+SHEET_TIME_LIMIT = 10.0
+MAX_SHEET_ROWS = 100000
 MAX_SQL_LEN = 2000
 RESERVE = 900  # tokens for one retry plus the result
 
@@ -52,12 +54,41 @@ def column_names(table):
     return names
 
 
-def instructions(table):
-    names = column_names(table)
+def describe_columns(table):
     cols = ["row (sheet row number)"]
-    for c, name in enumerate(names):
-        label = table.names[c].split(" (", 1)[1].rstrip(")") if " (" in table.names[c] else ""
+    for c, name in enumerate(column_names(table)):
+        full = table.names[c]
+        label = full.split(" (", 1)[1][:-1] if " (" in full else ""
         cols.append("%s (%s)" % (name, label) if label else name)
+    return ", ".join(cols)
+
+
+def sheet_instructions(table):
+    """The sql_to_sheet tool, for change requests."""
+    totals = ", ".join(table.where(i) for i in sorted(table.totals))
+    return (
+        '- {"tool": "sql_to_sheet", "sql": "SELECT ...", "sheet": "Cleaned"}  writes '
+        "the result of one SQLite SELECT to a NEW sheet and leaves this sheet "
+        "unchanged. Use it to clean or reshape data: remove duplicates, drop rows "
+        "with missing values, filter, fill blanks, trim text, summarise. It must be "
+        "the only operation.\n"
+        "  The selection is the table t with columns: %s. Empty cells are NULL; "
+        "missing values written as text (like 'N/A' or '-') are listed in the "
+        "column statistics. Numbers stored as text, like \"+4.68%%\", are numbers.%s\n"
+        "  Keep the original column order and ORDER BY row unless asked otherwise. "
+        "Do not select row unless asked.\n"
+        "  Remove duplicates of a, keeping the first: SELECT a, b, c FROM (SELECT *, "
+        "ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(a)) ORDER BY row) AS n FROM t) "
+        "WHERE n = 1 ORDER BY row\n"
+        "  Drop rows with a missing value: SELECT a, b, c FROM t WHERE b IS NOT NULL "
+        "AND c IS NOT NULL ORDER BY row"
+        % (describe_columns(table),
+           " These total rows are included in t: %s." % totals if totals else "")
+    )
+
+
+def instructions(table):
+    cols = describe_columns(table)
     return (
         "Some questions need every row, not just the rows shown: filtering, "
         "ranking, grouping, or totals over a subset. For those, first reply "
@@ -70,7 +101,7 @@ def instructions(table):
         "- Return at most %d rows and include the name column so results are "
         "readable.\n"
         "If the shown cells and statistics already answer the question, reply "
-        '{"sql_needed": false}.' % (", ".join(cols), MAX_ROWS)
+        '{"sql_needed": false}.' % (cols, MAX_ROWS)
     )
 
 
@@ -87,25 +118,7 @@ class SqlQuery(object):
         return self.sql
 
     def run(self):
-        conn = _load(self.table)
-        try:
-            deadline = time.monotonic() + TIME_LIMIT
-            conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 2000)
-            conn.set_authorizer(_authorize)
-            try:
-                cur = conn.execute(self.sql)
-                rows = cur.fetchmany(MAX_ROWS + 1)
-            except sqlite3.OperationalError as e:
-                if "interrupted" in str(e):
-                    raise QueryError("The query took longer than %g seconds." % TIME_LIMIT)
-                raise QueryError("SQLite error: %s" % e)
-            except sqlite3.DatabaseError as e:
-                raise QueryError("SQLite error: %s" % e)
-            except sqlite3.Warning as e:
-                raise QueryError("SQLite error: %s" % e)
-            cols = [d[0] for d in cur.description or []]
-        finally:
-            conn.close()
+        cols, rows = execute(self.sql, self.table, MAX_ROWS + 1, TIME_LIMIT)
         return self._format(cols, rows)
 
     def _format(self, cols, rows):
@@ -124,13 +137,71 @@ class SqlQuery(object):
         lines.append("%d row%s:" % (len(shown), "" if len(shown) == 1 else "s"))
         lines.append(" | ".join(cols))
         for r in shown:
-            lines.append(" | ".join(_cell(v) for v in r))
+            lines.append(" | ".join(format_cell(v) for v in r))
         if len(rows) > MAX_ROWS:
             lines.append("(more rows not shown)")
         return "\n".join(lines)
 
 
-def _cell(v):
+def execute(sql, table, max_rows, time_limit, include_totals=False):
+    """Run one read-only statement. Returns (column names, rows)."""
+    conn = _load(table, include_totals)
+    try:
+        deadline = time.monotonic() + time_limit
+        conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 2000)
+        conn.set_authorizer(_authorize)
+        try:
+            cur = conn.execute(sql)
+            rows = cur.fetchmany(max_rows)
+        except sqlite3.OperationalError as e:
+            if "interrupted" in str(e):
+                raise QueryError("The query took longer than %g seconds." % time_limit)
+            raise QueryError("SQLite error: %s" % e)
+        except (sqlite3.DatabaseError, sqlite3.Warning) as e:
+            raise QueryError("SQLite error: %s" % e)
+        cols = [d[0] for d in cur.description or []]
+    finally:
+        conn.close()
+    return cols, rows
+
+
+class SheetResult(object):
+    def __init__(self, headers, rows, source_rows):
+        self.headers = headers
+        self.rows = rows
+        self.source_rows = source_rows
+
+    def values(self):
+        """Header plus rows, as Calc wants them: floats and strings only."""
+        def cell(v):
+            if v is None:
+                return ""
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return float(v)
+            return str(v)
+        return [tuple(self.headers)] + [tuple(cell(v) for v in r) for r in self.rows]
+
+
+def run_to_sheet(sql, table):
+    """Run sql over every row, total rows included, for writing to a new
+    sheet. Output columns named after sheet letters get the original header."""
+    sql = sql.strip().rstrip(";").strip()
+    if not sql:
+        raise QueryError("Empty SQL.")
+    cols, rows = execute(sql, table, MAX_SHEET_ROWS + 1, SHEET_TIME_LIMIT, include_totals=True)
+    if not cols:
+        raise QueryError("The SQL returned no columns.")
+    if len(rows) > MAX_SHEET_ROWS:
+        raise QueryError("The result has more than %d rows." % MAX_SHEET_ROWS)
+    titles = {}
+    for c, name in enumerate(column_names(table)):
+        full = table.names[c]
+        titles[name] = full.split(" (", 1)[1][:-1] if " (" in full else name.upper()
+    headers = [titles.get(c.lower(), c) for c in cols]
+    return SheetResult(headers, rows, len(table.body))
+
+
+def format_cell(v):
     if v is None:
         return "-"
     if isinstance(v, float):
@@ -141,7 +212,7 @@ def _cell(v):
     return s if len(s) <= 40 else s[:39] + "~"
 
 
-def _load(table):
+def _load(table, include_totals=False):
     if not AVAILABLE:
         raise QueryError("SQLite is not available in this LibreOffice.")
     conn = sqlite3.connect(":memory:")
@@ -149,7 +220,7 @@ def _load(table):
     conn.execute("CREATE TABLE t (row INTEGER, %s)" % ", ".join('"%s"' % n for n in names))
     data = []
     for i, row in enumerate(table.body):
-        if i in table.totals:
+        if i in table.totals and not include_totals:
             continue
         values = [table.row_number(i)]
         for c in range(table.width):

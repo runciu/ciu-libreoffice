@@ -170,6 +170,55 @@ class Executor(unittest.TestCase):
         finally:
             srv.shutdown()
 
+    def test_new_sheet_from_sql(self):
+        from ciu_lo.core import sql as S
+        from ciu_lo.core.context import Table
+        self.doc.getCurrentController().select(self.cell("A1:C4"))
+        snap = reader.read_full(self.doc, reader.read_selection(self.doc))
+        result = S.run_to_sheet("SELECT a, b * c AS total FROM t ORDER BY total DESC", Table(snap))
+        before = self.sheet.getCellRangeByName("A1:C4").getFormulaArray()
+        self.doc.getSheets().insertNewByName("Cleaned", 1)
+        res = executor.apply_sheet(self.doc, "Cleaned", result, "Sales")
+        self.assertTrue(res.ok, res.message)
+        self.assertIn("Created sheet 'Cleaned 2' with 3 rows", res.message)
+        names = self.doc.getSheets().getElementNames()
+        self.assertEqual(names, ("Sales", "Cleaned 2", "Cleaned"))
+        new = self.doc.getSheets().getByName("Cleaned 2")
+        self.assertEqual(new.getCellRangeByName("A1:B4").getDataArray(),
+                         (("Item", "total"), ("Tea", 6.0), ("Milk", 3.0), ("Jam", 0.0)))
+        self.assertEqual(self.doc.getCurrentController().getActiveSheet().getName(), "Cleaned 2")
+        self.assertEqual(self.sheet.getCellRangeByName("A1:C4").getFormulaArray(), before)
+        self.um.undo()
+        self.assertEqual(self.doc.getSheets().getElementNames(), ("Sales", "Cleaned"))
+
+    def test_failed_apply_never_undoes_user_edit(self):
+        """An undo context with no changes does not reach the stack, so a
+        blind undo() after an early failure would revert the user's edit."""
+        self.cell("H1").setString("user edit")
+        p = plan({"tool": "set_formula", "target": "E1", "formula": "=1"})
+        original = executor._write
+
+        def boom(sheet, op):
+            raise RuntimeError("fail before writing")
+        executor._write = boom
+        try:
+            res = executor.apply(self.doc, p, [])
+        finally:
+            executor._write = original
+        self.assertFalse(res.ok)
+        self.assertEqual(self.cell("H1").getString(), "user edit")
+
+    def test_read_full_reads_every_row(self):
+        rows = [("n", "v")] + [("r%d" % i, float(i)) for i in range(2500)]
+        self.sheet.getCellRangeByName("K1:L2501").setDataArray(rows)
+        self.doc.getCurrentController().select(self.cell("K1:L2501"))
+        snap = reader.read_selection(self.doc)
+        self.assertLess(snap.n_read, snap.total_rows)
+        full = reader.read_full(self.doc, snap)
+        self.assertEqual(full.n_read, 2501)
+        with self.assertRaises(reader.SelectionError):
+            reader.read_full(self.doc, snap, max_cells=100)
+
     def test_free_space_hints(self):
         self.doc.getCurrentController().select(self.cell("A1:C4"))
         snap = reader.read_selection(self.doc)

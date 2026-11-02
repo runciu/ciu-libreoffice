@@ -84,6 +84,33 @@ def read_selection(model, controller=None):
     )
 
 
+FULL_MAX_CELLS = 500000
+
+
+def read_full(model, snapshot, max_cells=FULL_MAX_CELLS):
+    """Every row of the range a snapshot came from, for operations that must
+    not silently drop rows, such as writing a cleaned copy."""
+    if snapshot.total_rows * snapshot.total_cols > max_cells:
+        raise SelectionError("The selection has more than %d cells; select fewer rows."
+                             % max_cells)
+    sheets = model.getSheets()
+    if not sheets.hasByName(snapshot.sheet):
+        raise SelectionError("Sheet '%s' no longer exists." % snapshot.sheet)
+    block = sheets.getByName(snapshot.sheet).getCellRangeByPosition(
+        snapshot.start_col, snapshot.start_row,
+        snapshot.start_col + snapshot.total_cols - 1,
+        snapshot.start_row + snapshot.total_rows - 1)
+    return Snapshot(
+        doc_title=snapshot.doc_title,
+        sheet=snapshot.sheet,
+        start_col=snapshot.start_col,
+        start_row=snapshot.start_row,
+        rows=[list(r) for r in block.getDataArray()],
+        total_rows=snapshot.total_rows,
+        total_cols=snapshot.total_cols,
+    )
+
+
 def _free_space_hints(sheet, addr):
     """Where new results can go without overwriting anything: the first
     empty column to the right and the first empty row below the range.
