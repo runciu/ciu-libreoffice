@@ -79,12 +79,17 @@ def detect_header(rows):
     return not any(str(v) in body_vals for v in non_empty) and len(non_empty) == len(first)
 
 
+TOTAL_LABELS = ("total", "totals", "grand total", "sum", "world", "all", "overall")
+TOTAL_TOLERANCE = 0.03
+
+
 class ColumnProfile(object):
-    def __init__(self, col_index, name, values):
+    def __init__(self, col_index, name, values, exclude=()):
         self.col_index = col_index
         self.name = name
-        self.count = len(values)
-        filled = [v for v in values if not is_empty(v)]
+        kept = [i for i in range(len(values)) if i not in exclude]
+        self.count = len(kept)
+        filled = [values[i] for i in kept if not is_empty(values[i])]
         self.missing = self.count - len(filled)
         nums = [float(v) for v in filled if is_num(v)]
         texts = [v for v in filled if not is_num(v)]
@@ -106,7 +111,7 @@ class ColumnProfile(object):
                                   reverse=True)[:3]
         self.nums = nums
         # Indexes into values, so callers can say which row holds an extreme.
-        self.ranked = sorted((i for i, v in enumerate(values) if is_num(v)),
+        self.ranked = sorted((i for i in kept if is_num(values[i])),
                              key=lambda i: float(values[i]))
         if nums:
             self.min, self.max = min(nums), max(nums)
@@ -139,24 +144,56 @@ class ColumnProfile(object):
         return "; ".join(bits)
 
 
+def _is_total_label(text):
+    t = str(text).strip().lower().rstrip(":")
+    return t in TOTAL_LABELS or t.startswith("total ") or t.endswith(" total")
+
+
+def _total_rows(body, profiles, label_col):
+    """Rows that aggregate the others: labelled as a total, or holding a
+    value equal to the sum of every other value in its column."""
+    found = set()
+    if label_col is not None:
+        for i, row in enumerate(body):
+            if label_col < len(row) and _is_total_label(row[label_col]):
+                found.add(i)
+    for p in profiles:
+        if len(p.ranked) < 3:
+            continue
+        i = p.ranked[-1]
+        top = float(body[i][p.col_index])
+        rest = p.sum - top
+        if rest > 0 and abs(top - rest) <= TOTAL_TOLERANCE * rest:
+            found.add(i)
+    return found
+
+
 def profile(snapshot):
+    """Returns (header, profiles, total_rows). Total rows are left out of the
+    statistics, so "largest" means the largest item, not the grand total."""
     rows = snapshot.rows
     header = detect_header(rows)
     body = rows[1:] if header else rows
     width = max((len(r) for r in rows), default=0)
-    profiles = []
+    names = []
     for c in range(width):
         letter = col_letter(snapshot.start_col + c)
         if header and c < len(rows[0]) and not is_empty(rows[0][c]):
-            name = "%s (%s)" % (letter, str(rows[0][c]).strip())
+            names.append("%s (%s)" % (letter, str(rows[0][c]).strip()))
         else:
-            name = letter
-        vals = [r[c] if c < len(r) else "" for r in body]
-        profiles.append(ColumnProfile(c, name, vals))
+            names.append(letter)
+    columns = [[r[c] if c < len(r) else "" for r in body] for c in range(width)]
 
+    def build(exclude):
+        return [ColumnProfile(c, names[c], columns[c], exclude) for c in range(width)]
+
+    profiles = build(())
     # Rows are named by the first text column, so the model can answer
     # "which row has the largest value" even when that row is not shown.
     label_col = next((p.col_index for p in profiles if p.kind == "text"), None)
+    totals = _total_rows(body, profiles, label_col)
+    if totals:
+        profiles = build(totals)
     first_row = snapshot.start_row + (2 if header else 1)
 
     def where(i, label_only=False):
@@ -170,7 +207,7 @@ def profile(snapshot):
 
     for p in profiles:
         p.where = where
-    return header, profiles
+    return header, profiles, [where(i) for i in sorted(totals)]
 
 
 def fmt(v):
@@ -210,7 +247,7 @@ def estimate_tokens(text):
 
 def render(snapshot, budget=2000, max_formulas=25, measure=estimate_tokens):
     """Prompt text for the selection, at most budget as counted by measure."""
-    header, profiles = profile(snapshot)
+    header, profiles, totals = profile(snapshot)
     lines = []
     lines.append("Document: %s" % snapshot.doc_title)
     lines.append("Sheet: %s" % snapshot.sheet)
@@ -225,6 +262,8 @@ def render(snapshot, budget=2000, max_formulas=25, measure=estimate_tokens):
         "yes (row %d)" % (snapshot.start_row + 1) if header else "not detected"))
     for h in snapshot.hints:
         lines.append(h)
+    if totals:
+        lines.append("Total rows (left out of the statistics): %s" % ", ".join(totals[:5]))
 
     if profiles:
         lines.append("")

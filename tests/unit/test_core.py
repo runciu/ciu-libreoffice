@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import threading
@@ -46,7 +47,7 @@ class Analysis(unittest.TestCase):
 
     def test_profile_stats_missing_and_duplicates(self):
         rows = [["ID", "Amount"], ["a", 1.5], ["b", ""], ["a", 2.5], ["c", 0.1], ["d", 0.2]]
-        header, profs = context.profile(context.Snapshot("d", "S", 0, 0, rows))
+        header, profs, _ = context.profile(context.Snapshot("d", "S", 0, 0, rows))
         self.assertTrue(header)
         ids, amt = profs
         self.assertEqual(ids.duplicates, 1)
@@ -143,6 +144,28 @@ class Extremes(unittest.TestCase):
         out = context.render(countries_snapshot(), budget=700)
         self.assertNotIn("\tChina\t", out)
         self.assertIn("China", out)
+
+    def test_total_row_by_sum_is_excluded(self):
+        snap = countries_snapshot()
+        body = snap.rows[1:]
+        world = [math.fsum(r[c] for r in body) if c in (1, 2) else v
+                 for c, v in enumerate(["Planet", 0, 0, "+0.9%", "-"])]
+        snap.rows.insert(150, world)
+        out = context.render(snap, budget=1500)
+        self.assertIn("Total rows (left out of the statistics): row 151: Planet", out)
+        self.assertIn("max 1425887337 (row 101: China)", out)
+        self.assertIn("highest: China, India,", out)
+
+    def test_total_row_by_label_is_excluded(self):
+        rows = [["Item", "Cost"], ["Tea", 2.0], ["Milk", 1.5], ["Grand total", 99.0]]
+        out = context.render(context.Snapshot("d", "S", 0, 0, rows))
+        self.assertIn("Total rows (left out of the statistics): row 4: Grand total", out)
+        self.assertIn("max 2 (row 2: Tea)", out)
+        self.assertIn("sum 3.5", out)
+
+    def test_no_false_total_on_ordinary_data(self):
+        out = context.render(countries_snapshot(), budget=1500)
+        self.assertNotIn("Total rows", out)
 
     def test_no_label_column_falls_back_to_row(self):
         rows = [["A", "B"]] + [[float(i), float(i * 2)] for i in range(10)]
