@@ -1,0 +1,1 @@
+Connects LibreOffice Calc to CIU, the local AI layer that shares one model across your applications. Select cells, ask a question, get an answer from the model already running on your machine. Nothing leaves your computer.

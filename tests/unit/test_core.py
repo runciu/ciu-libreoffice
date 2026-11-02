@@ -1,0 +1,201 @@
+import os
+import sys
+import threading
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "..", "python", "pythonpath"))
+sys.path.insert(0, os.path.join(HERE, ".."))
+
+from ciu_lo.core import context, prompts
+from ciu_lo.core.ciu_client import CIUClient, CIUError, ThinkFilter
+import mock_ciu
+
+
+def sales_snapshot(n=4):
+    rows = [["Region", "Revenue", "Customer"]]
+    for i in range(n):
+        rows.append(["North" if i % 2 else "South", float(100 + i * 10), "C%d" % (i % 3)])
+    formulas = [[str(v) for v in r] for r in rows]
+    return context.Snapshot("sales.ods", "Sales", 0, 0, rows, formulas)
+
+
+class Addressing(unittest.TestCase):
+    def test_letters(self):
+        for idx, want in [(0, "A"), (25, "Z"), (26, "AA"), (51, "AZ"), (52, "BA"), (701, "ZZ"), (702, "AAA")]:
+            self.assertEqual(context.col_letter(idx), want)
+
+    def test_range_ref(self):
+        snap = context.Snapshot("d", "S", 1, 4, [[1.0, 2.0]] * 3)
+        self.assertEqual(snap.range_ref(), "B5:C7")
+        self.assertEqual(context.Snapshot("d", "S", 2, 0, [[1.0]]).range_ref(), "C1")
+
+
+class Analysis(unittest.TestCase):
+    def test_header_detected_over_numbers(self):
+        self.assertTrue(context.detect_header(sales_snapshot().rows))
+
+    def test_no_header_for_numeric_first_row(self):
+        self.assertFalse(context.detect_header([[1.0, 2.0], [3.0, 4.0]]))
+
+    def test_all_text_table_header(self):
+        rows = [["Name", "City"], ["Ann", "Leeds"], ["Bo", "York"]]
+        self.assertTrue(context.detect_header(rows))
+        rows = [["Ann", "Leeds"], ["Bo", "Leeds"]]
+        self.assertFalse(context.detect_header(rows))
+
+    def test_profile_stats_missing_and_duplicates(self):
+        rows = [["ID", "Amount"], ["a", 1.5], ["b", ""], ["a", 2.5], ["c", 0.1], ["d", 0.2]]
+        header, profs = context.profile(context.Snapshot("d", "S", 0, 0, rows))
+        self.assertTrue(header)
+        ids, amt = profs
+        self.assertEqual(ids.duplicates, 1)
+        self.assertEqual(amt.missing, 1)
+        self.assertEqual(amt.kind, "number")
+        self.assertEqual(context.fmt(amt.sum), "4.3")
+        self.assertIn("A (ID)", ids.name)
+
+    def test_mixed_column(self):
+        p = context.ColumnProfile(0, "A", [1.0, "x", 2.0])
+        self.assertTrue(p.kind.startswith("mixed"))
+
+    def test_fmt(self):
+        self.assertEqual(context.fmt(3.0), "3")
+        self.assertEqual(context.fmt(0.1 + 0.2), "0.3")
+        self.assertEqual(context.fmt(None), "-")
+
+
+class Rendering(unittest.TestCase):
+    def test_contains_key_parts(self):
+        out = context.render(sales_snapshot(), budget_chars=4000)
+        self.assertIn("Sheet: Sales", out)
+        self.assertIn("Range: A1:C5", out)
+        self.assertIn("B (Revenue)", out)
+        self.assertIn("sum 460", out)
+        self.assertIn("\n2\tSouth\t100\tC0", out)
+
+    def test_budget_is_respected_for_many_sizes(self):
+        big = sales_snapshot(1500)
+        for budget in (300, 800, 2000, 6000, 20000):
+            self.assertLessEqual(len(context.render(big, budget_chars=budget)), budget)
+
+    def test_truncation_reported(self):
+        out = context.render(sales_snapshot(1500), budget_chars=2000)
+        self.assertRegex(out, r"\[showing \d+ of 1501 rows\]")
+
+    def test_partial_read_noted(self):
+        snap = sales_snapshot(10)
+        snap.total_rows = 5000
+        self.assertIn("first 11 of 5000 rows", context.render(snap))
+
+    def test_formulas_listed(self):
+        rows = [[1.0, 2.0, 3.0]]
+        formulas = [["1", "2", "=A1+B1"]]
+        out = context.render(context.Snapshot("d", "S", 0, 9, rows, formulas))
+        self.assertIn("C10: =A1+B1", out)
+
+    def test_wide_cells_clipped(self):
+        rows = [["x" * 500]]
+        out = context.render(context.Snapshot("d", "S", 0, 0, rows))
+        self.assertNotIn("x" * 100, out)
+
+
+class Prompts(unittest.TestCase):
+    def test_fits_context_window(self):
+        big = sales_snapshot(3000)
+        for n_ctx in (2048, 4096, 8192, 32768):
+            msgs, max_tokens = prompts.build_messages(big, "Summarise", n_ctx)
+            chars = sum(len(m["content"]) for m in msgs)
+            est_tokens = chars / prompts.CHARS_PER_TOKEN
+            self.assertLess(est_tokens + max_tokens, n_ctx, n_ctx)
+
+    def test_missing_n_ctx_uses_default(self):
+        msgs, max_tokens = prompts.build_messages(sales_snapshot(), "q", None)
+        self.assertEqual(max_tokens, prompts.answer_tokens(prompts.DEFAULT_N_CTX))
+        self.assertEqual(msgs[0]["role"], "system")
+        self.assertIn("Request: q", msgs[1]["content"])
+
+
+class Think(unittest.TestCase):
+    def run_chunks(self, text, size):
+        f = ThinkFilter()
+        out = "".join(f.feed(text[i:i + size]) for i in range(0, len(text), size))
+        return out + f.flush()
+
+    def test_every_split(self):
+        text = "Hello <think>secret plans</think>world <think>more</think>!"
+        for size in range(1, len(text) + 1):
+            self.assertEqual(self.run_chunks(text, size), "Hello world !", size)
+
+    def test_lone_angle_bracket_kept(self):
+        self.assertEqual(self.run_chunks("a < b and x<thin", 3), "a < b and x<thin")
+
+    def test_unclosed_think_dropped(self):
+        self.assertEqual(self.run_chunks("ok<think>never closed", 4), "ok")
+
+
+class Client(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = mock_ciu.start()
+        cls.base = "http://127.0.0.1:%d" % cls.srv.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def setUp(self):
+        mock_ciu.STATE.__init__()
+        self.client = CIUClient(self.base)
+
+    def test_status_ready(self):
+        st = self.client.status()
+        self.assertTrue(st.ready)
+        self.assertEqual(st.model, "Qwen3.5-9B-Q4_K_M.gguf")
+        self.assertEqual(st.n_ctx, 4096)
+        self.assertIn("Connected", st.describe())
+
+    def test_status_unreachable(self):
+        st = CIUClient("http://127.0.0.1:9").status(timeout=0.5)
+        self.assertFalse(st.reachable)
+        self.assertIn("not running", st.describe())
+
+    def test_stream_strips_thinking_and_sends_options(self):
+        got = []
+        text = self.client.chat_stream([{"role": "user", "content": "hi"}], got.append, max_tokens=50)
+        self.assertEqual(text, "The selection has 3 rows. Total is =SUM(B2:B4).")
+        self.assertEqual("".join(got), text)
+        req = mock_ciu.STATE.last_request
+        self.assertTrue(req["stream"])
+        self.assertEqual(req["max_tokens"], 50)
+        self.assertFalse(req["chat_template_kwargs"]["enable_thinking"])
+
+    def test_not_loaded_message(self):
+        mock_ciu.STATE.state = "stopped"
+        with self.assertRaises(CIUError) as cm:
+            self.client.chat_stream([], lambda t: None)
+        self.assertIn("No model loaded", str(cm.exception))
+
+    def test_context_full_message_passed_through(self):
+        mock_ciu.STATE.http_error = (400, "This conversation has filled the 4096-token context.")
+        with self.assertRaises(CIUError) as cm:
+            self.client.chat_stream([], lambda t: None)
+        self.assertIn("4096-token context", str(cm.exception))
+
+    def test_stop_midway(self):
+        mock_ciu.STATE.reply = "x" * 400
+        mock_ciu.STATE.chunk = 4
+        mock_ciu.STATE.delay = 0.005
+        stop = threading.Event()
+        got = []
+
+        def on_delta(t):
+            got.append(t)
+            if len(got) == 5:
+                stop.set()
+        text = self.client.chat_stream([], on_delta, should_stop=stop.is_set)
+        self.assertLess(len(text), 400)
+
+
+if __name__ == "__main__":
+    unittest.main()
