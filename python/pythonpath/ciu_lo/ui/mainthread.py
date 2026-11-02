@@ -1,5 +1,8 @@
 """Runs callables on LibreOffice's main thread from worker threads, via
-com.sun.star.awt.AsyncCallback. Streamed text is coalesced per wake-up.
+com.sun.star.awt.AsyncCallback.
+
+Callables and streamed text run in the order they were posted. Consecutive
+text is merged, so a fast model does not cost one UI update per token.
 """
 
 import threading
@@ -22,8 +25,7 @@ class MainThread(object):
             "com.sun.star.awt.AsyncCallback", ctx)
         self._wake = _Wake(self)
         self._lock = threading.Lock()
-        self._queue = []
-        self._text = []
+        self._queue = []  # callables, or lists of text pieces
         self._scheduled = False
         self._on_text = on_text
         self.closed = False
@@ -35,7 +37,10 @@ class MainThread(object):
 
     def post_text(self, text):
         with self._lock:
-            self._text.append(text)
+            if self._queue and isinstance(self._queue[-1], list):
+                self._queue[-1].append(text)
+            else:
+                self._queue.append([text])
             self._schedule_locked()
 
     def _schedule_locked(self):
@@ -47,12 +52,12 @@ class MainThread(object):
     def _drain(self):
         with self._lock:
             queue, self._queue = self._queue, []
-            text, self._text = "".join(self._text), []
             self._scheduled = False
         if self.closed:
             return
-        # Text first, so a callback queued after the last token sees it on screen.
-        if text and self._on_text:
-            self._on_text(text)
-        for fn in queue:
-            fn()
+        for item in queue:
+            if isinstance(item, list):
+                if self._on_text:
+                    self._on_text("".join(item))
+            else:
+                item()

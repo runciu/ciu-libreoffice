@@ -139,6 +139,42 @@ class Extension(unittest.TestCase):
         self.assertIn("4096-token context", state["answer"])
         self.assertEqual(len(mock_ciu.STATE.requests), 3)
 
+    def test_5a_question_runs_exact_query(self):
+        mock_ciu.STATE.plan_reply = json.dumps(
+            {"query_needed": True, "value": "B", "sort": "desc", "limit": 1})
+        OFFICE.hook("prompt:Which item costs the most?")
+        OFFICE.hook("press:ask")
+        state = wait_done()
+        self.assertTrue(state["answer"].startswith(
+            "Computed: all rows, value = B, highest first, top 1\n\n"), state["answer"])
+        self.assertTrue(state["answer"].endswith("Total is =SUM(B2:B4)."))
+        router, final = mock_ciu.STATE.requests
+        self.assertIn("query_needed", json.dumps(router["response_format"]))
+        self.assertFalse(router["stream"])
+        self.assertTrue(final["stream"])
+        self.assertEqual(final["messages"][:2], router["messages"])
+        last = final["messages"][-1]["content"]
+        self.assertIn("Query result, computed exactly:", last)
+        self.assertIn("1. row 2: Tea | value 2", last)
+        self.assertIn("Total rows were left out.", last)
+
+    def test_5b_question_without_query(self):
+        mock_ciu.STATE.plan_reply = '{"query_needed": false}'
+        OFFICE.hook("prompt:What is in this table?")
+        OFFICE.hook("press:ask")
+        state = wait_done()
+        self.assertEqual(state["answer"], "The selection has 3 rows. Total is =SUM(B2:B4).")
+        self.assertIn("No query needed", mock_ciu.STATE.requests[-1]["messages"][-1]["content"])
+
+    def test_5c_bad_query_reported_to_model(self):
+        mock_ciu.STATE.plan_reply = json.dumps({"query_needed": True, "value": "Q * 2"})
+        OFFICE.hook("prompt:Double column Q")
+        OFFICE.hook("press:ask")
+        state = wait_done()
+        self.assertFalse(state["busy"])
+        self.assertIn("The query could not be run: Column Q is outside the selection.",
+                      mock_ciu.STATE.requests[-1]["messages"][-1]["content"])
+
     def test_6a_propose_preview_apply(self):
         mock_ciu.STATE.plan_reply = json.dumps({
             "summary": "Add VAT column.", "operations": [

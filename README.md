@@ -8,6 +8,8 @@ Version 0.0.1. Calc only for now.
 
 **Ask.** Get a streamed answer about the selected cells, or use one of the shortcuts: Summarise, Explain formulas, Find issues.
 
+Questions that need every row, such as "which African country grew most" on a 240-row table, are answered with an exact query. The model writes a small query (filters, a calculated value such as `C - B`, a sort, top N, or a sum, mean, median, min, max or count). The extension runs it over all rows and gives the result back to the model before it answers. The window shows the query it ran.
+
 **Propose change.** CIU returns a plan built from three operations:
 
 | Operation | Effect |
@@ -52,6 +54,7 @@ python/pythonpath/ciu_lo/
     context.py      selection to prompt text, with column statistics
     prompts.py      prompts and context budget
     plan.py         plan parsing and validation
+    query.py        exact queries over all rows
   calc/     reading selections and applying plans
   ui/       the assistant window and main-thread dispatch
 registry/Addons.xcu         the CIU menu
@@ -60,7 +63,8 @@ registry/Addons.xcu         the CIU menu
 ## How it works
 
 - **Context budget.** The prompt is sized to the context length CIU reports. Column statistics come first, and raw rows fill the space that is left.
-- **Arithmetic in code.** Counts, missing values, duplicates, min, max, sum and mean are computed exactly, not by the model.
+- **Arithmetic in code.** Counts, missing values, duplicates, min, max, sum and mean are computed exactly, not by the model. Total rows (Total, World, or a row equal to the sum of the others) are left out.
+- **Queries.** The query and the answer share the same prompt prefix, so llama-server reuses its cache instead of reading the selection twice.
 - **Structured output.** Plans are requested with a JSON schema, so the model's output is always well-formed. If the server rejects the schema, the client retries without it.
 - **Threading.** Requests run on a worker thread. All LibreOffice calls happen on the main thread.
 - **No dependencies.** Standard library only, because LibreOffice's bundled Python has no package manager.

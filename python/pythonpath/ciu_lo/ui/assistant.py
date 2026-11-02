@@ -11,6 +11,7 @@ from com.sun.star.awt import XActionListener, XTopWindowListener
 
 from ..calc import executor, reader
 from ..core import prompts
+from ..core import query as querymod
 from ..core.plan import PLAN_SCHEMA, PlanError, parse_plan
 from ..core.ciu_client import CIUClient, CIUError
 from ..core.context import summary_line
@@ -158,7 +159,7 @@ class AssistantDialog(object):
         elif command.startswith("quick:"):
             title, question = prompts.QUICK_ACTIONS[int(command.split(":")[1])]
             self._set("txtPrompt", question)
-            self.ask(question)
+            self.ask(question, with_query=False)
 
     def refresh_scope(self):
         try:
@@ -171,8 +172,8 @@ class AssistantDialog(object):
             self._label_set("lblScope", "Selection: could not read (%s)" % e)
         return None
 
-    def ask(self, question):
-        self._start(question, self._work)
+    def ask(self, question, with_query=True):
+        self._start(question, lambda snap, text: self._work(snap, text, with_query))
 
     def propose(self, request):
         self._start(request, self._work_plan)
@@ -239,7 +240,7 @@ class AssistantDialog(object):
         finally:
             self.ui.post(lambda: self._set_busy(False))
 
-    def _work(self, snap, question):
+    def _work(self, snap, question, with_query=True):
         try:
             status = self.client.status()
             self.ui.post(lambda: self._apply_status(status))
@@ -247,10 +248,10 @@ class AssistantDialog(object):
                 self.ui.post(lambda: self._show_answer(status.describe()))
                 return
             self._fit_and_send(
-                lambda scale: prompts.build_messages(snap, question, status.n_ctx, scale),
-                lambda messages, max_tokens: self.client.chat_stream(
-                    messages, on_delta=self.ui.post_text,
-                    should_stop=self.stop_event.is_set, max_tokens=max_tokens))
+                lambda scale: prompts.build_messages(snap, question, status.n_ctx, scale,
+                                                     with_query=with_query),
+                lambda messages, max_tokens: self._answer(
+                    snap, messages, max_tokens, with_query))
             if self.stop_event.is_set():
                 self.ui.post(lambda: self._append_answer("\n[stopped]"))
         except CIUError as e:
@@ -261,6 +262,27 @@ class AssistantDialog(object):
             self.ui.post(lambda: self._append_answer("\nUnexpected error:\n" + tb))
         finally:
             self.ui.post(lambda: self._set_busy(False))
+
+    def _answer(self, snap, messages, max_tokens, with_query):
+        """Optional query step, then the streamed answer. Worker thread."""
+        if with_query:
+            self.ui.post(lambda: self._show_answer("Thinking..."))
+            reply = self.client.chat_json(messages, querymod.QUERY_SCHEMA,
+                                          max_tokens=prompts.QUERY_REPLY_TOKENS)
+            if self.stop_event.is_set():
+                return
+            try:
+                q = querymod.parse(reply, snap)
+                result = prompts.fit_result(q.run()) if q else None
+                shown = "Computed: %s\n\n" % q.describe() if q else ""
+            except querymod.QueryError as e:
+                result = "The query could not be run: %s" % e
+                shown = ""
+            self.ui.post(lambda: self._show_answer(shown))
+            messages = prompts.follow_up(messages, reply or '{"query_needed": false}', result)
+        return self.client.chat_stream(
+            messages, on_delta=self.ui.post_text,
+            should_stop=self.stop_event.is_set, max_tokens=max_tokens)
 
     def _fit_and_send(self, build, send):
         """Send with a smaller selection each time the server reports the

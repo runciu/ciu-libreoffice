@@ -168,46 +168,64 @@ def _total_rows(body, profiles, label_col):
     return found
 
 
+class Table(object):
+    """A selection split into header and body, with column profiles, the
+    label column, and the indexes of total rows."""
+
+    def __init__(self, snapshot):
+        rows = snapshot.rows
+        self.snapshot = snapshot
+        self.header = detect_header(rows)
+        self.body = rows[1:] if self.header else rows
+        self.width = max((len(r) for r in rows), default=0)
+        self.first_row = snapshot.start_row + (2 if self.header else 1)
+        self.names = []
+        for c in range(self.width):
+            letter = col_letter(snapshot.start_col + c)
+            if self.header and c < len(rows[0]) and not is_empty(rows[0][c]):
+                self.names.append("%s (%s)" % (letter, str(rows[0][c]).strip()))
+            else:
+                self.names.append(letter)
+        self.columns = [[r[c] if c < len(r) else "" for r in self.body]
+                        for c in range(self.width)]
+
+        profiles = self._profiles(())
+        # Rows are named by the first text column, so the model can answer
+        # "which row has the largest value" even when that row is not shown.
+        self.label_col = next((p.col_index for p in profiles if p.kind == "text"), None)
+        self.totals = _total_rows(self.body, profiles, self.label_col)
+        self.profiles = self._profiles(self.totals) if self.totals else profiles
+        for p in self.profiles:
+            p.where = self.where
+
+    def _profiles(self, exclude):
+        return [ColumnProfile(c, self.names[c], self.columns[c], exclude)
+                for c in range(self.width)]
+
+    def row_number(self, i):
+        return self.first_row + i
+
+    def label(self, i):
+        row = self.body[i]
+        lc = self.label_col
+        if lc is not None and lc < len(row) and not is_empty(row[lc]):
+            return _cell_text(row[lc], 30)
+        return ""
+
+    def where(self, i, label_only=False):
+        label = self.label(i)
+        if label_only:
+            return label or "row %d" % self.row_number(i)
+        if label:
+            return "row %d: %s" % (self.row_number(i), label)
+        return "row %d" % self.row_number(i)
+
+
 def profile(snapshot):
     """Returns (header, profiles, total_rows). Total rows are left out of the
     statistics, so "largest" means the largest item, not the grand total."""
-    rows = snapshot.rows
-    header = detect_header(rows)
-    body = rows[1:] if header else rows
-    width = max((len(r) for r in rows), default=0)
-    names = []
-    for c in range(width):
-        letter = col_letter(snapshot.start_col + c)
-        if header and c < len(rows[0]) and not is_empty(rows[0][c]):
-            names.append("%s (%s)" % (letter, str(rows[0][c]).strip()))
-        else:
-            names.append(letter)
-    columns = [[r[c] if c < len(r) else "" for r in body] for c in range(width)]
-
-    def build(exclude):
-        return [ColumnProfile(c, names[c], columns[c], exclude) for c in range(width)]
-
-    profiles = build(())
-    # Rows are named by the first text column, so the model can answer
-    # "which row has the largest value" even when that row is not shown.
-    label_col = next((p.col_index for p in profiles if p.kind == "text"), None)
-    totals = _total_rows(body, profiles, label_col)
-    if totals:
-        profiles = build(totals)
-    first_row = snapshot.start_row + (2 if header else 1)
-
-    def where(i, label_only=False):
-        row = body[i]
-        label = ""
-        if label_col is not None and label_col < len(row) and not is_empty(row[label_col]):
-            label = _cell_text(row[label_col], 30)
-        if label_only:
-            return label or "row %d" % (first_row + i)
-        return "row %d: %s" % (first_row + i, label) if label else "row %d" % (first_row + i)
-
-    for p in profiles:
-        p.where = where
-    return header, profiles, [where(i) for i in sorted(totals)]
+    t = Table(snapshot)
+    return t.header, t.profiles, [t.where(i) for i in sorted(t.totals)]
 
 
 def fmt(v):
