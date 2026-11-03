@@ -47,14 +47,20 @@ def context_budget(n_ctx, system, request, max_tokens, scale=1.0):
     return int(max(MIN_CONTEXT_TOKENS, min(MAX_CONTEXT_TOKENS, free)))
 
 
-def _messages(system, snapshot, request, budget):
+def _messages(system, snapshot, request, budget, issues=False):
+    extra = ""
+    if issues:
+        found = ctxmod.find_issues(ctxmod.Table(snapshot))
+        extra = "\n\nIssues found by exact checks:\n%s" % (
+            "\n".join("- " + line for line in found) if found else "- none")
+        budget = max(MIN_CONTEXT_TOKENS, budget - ctxmod.estimate_tokens(extra))
     block = ctxmod.render(snapshot, budget=budget)
-    user = "Selection:\n%s\n\nRequest: %s" % (block, request.strip())
+    user = "Selection:\n%s%s\n\nRequest: %s" % (block, extra, request.strip())
     return [{"role": "system", "content": system},
             {"role": "user", "content": user}]
 
 
-def build_messages(snapshot, question, n_ctx, scale=1.0, engine=None):
+def build_messages(snapshot, question, n_ctx, scale=1.0, engine=None, issues=False):
     """Returns (messages, max_tokens). With an engine, adds its query
     instructions and leaves room for queries and a result before the answer."""
     max_tokens = answer_tokens(n_ctx or DEFAULT_N_CTX)
@@ -65,7 +71,7 @@ def build_messages(snapshot, question, n_ctx, scale=1.0, engine=None):
                   "\n" + CHANGE_HINT)
         reserve = engine.RESERVE + QUERY_REPLY_TOKENS
     budget = context_budget(n_ctx, system, question, max_tokens + reserve, scale)
-    return _messages(system, snapshot, question, budget), max_tokens
+    return _messages(system, snapshot, question, budget, issues), max_tokens
 
 
 CHANGE_HINT = (
@@ -159,14 +165,18 @@ def build_action_messages(snapshot, request, n_ctx, scale=1.0, sql=None):
     return _messages(system, snapshot, request, budget), max_tokens
 
 
+# (button, request, include the exact issue scan)
 QUICK_ACTIONS = [
-    ("Summarise", "Summarise this data: what it contains, notable patterns, "
-                  "and anything that looks wrong."),
+    ("Summarise", "Summarise this data in a short paragraph or a few bullets: what it "
+                  "contains, notable patterns, and the main problems from the issues "
+                  "list, if any.", True),
     ("Explain formulas", "Explain what the formulas in this selection do, in "
-                         "plain language, and point out any that look wrong."),
-    ("Find issues", "Check this data for problems. The header row and total rows "
-                    "are not data, so do not report their empty cells. Look for: "
-                    "missing values, duplicates, "
-                    "mixed types, outliers, inconsistent text. List each "
-                    "problem with cell addresses."),
+                         "plain language, and point out any that look wrong.", False),
+    ("Find issues", "Summarise the problems in this data, using the issues found by "
+                    "exact checks as your source. Group them by type. For each, one "
+                    "line: what is wrong, how many cells, at most three example cells, "
+                    "and a suggested fix. Do not list every cell, do not treat the "
+                    "header or total rows as data, and do not report repeated values "
+                    "in category columns (like country or client) as problems. At most "
+                    "10 lines.", True),
 ]

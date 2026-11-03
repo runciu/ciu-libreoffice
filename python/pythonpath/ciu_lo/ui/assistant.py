@@ -56,7 +56,7 @@ class AssistantDialog(object):
         y += 18
 
         bw = (inner - 2 * 4) // 3
-        for i, (title, _) in enumerate(prompts.QUICK_ACTIONS):
+        for i, (title, _, _) in enumerate(prompts.QUICK_ACTIONS):
             self._button("btnQuick%d" % i, PAD + i * (bw + 4), y, bw, 14, title, "quick:%d" % i)
         y += 19
 
@@ -160,9 +160,9 @@ class AssistantDialog(object):
         elif command == "scope":
             self.refresh_scope()
         elif command.startswith("quick:"):
-            title, question = prompts.QUICK_ACTIONS[int(command.split(":")[1])]
+            title, question, issues = prompts.QUICK_ACTIONS[int(command.split(":")[1])]
             self._set("txtPrompt", question)
-            self.ask(question, with_query=False)
+            self.ask(question, with_query=False, issues=issues)
 
     def refresh_scope(self):
         try:
@@ -175,8 +175,8 @@ class AssistantDialog(object):
             self._label_set("lblScope", "Selection: could not read (%s)" % e)
         return None
 
-    def ask(self, question, with_query=True):
-        self._start(question, lambda snap, text: self._work(snap, text, with_query))
+    def ask(self, question, with_query=True, issues=False):
+        self._start(question, lambda snap, text: self._work(snap, text, with_query, issues))
 
     def propose(self, request):
         self._start(request, self._work_plan)
@@ -249,7 +249,7 @@ class AssistantDialog(object):
         finally:
             self.ui.post(lambda: self._set_busy(False))
 
-    def _work(self, snap, question, with_query=True):
+    def _work(self, snap, question, with_query=True, issues=False):
         try:
             status = self.client.status()
             self.ui.post(lambda: self._apply_status(status))
@@ -259,7 +259,7 @@ class AssistantDialog(object):
             engine = enginemod.current() if with_query else None
             self._fit_and_send(
                 lambda scale: prompts.build_messages(snap, question, status.n_ctx, scale,
-                                                     engine=engine),
+                                                     engine=engine, issues=issues),
                 lambda messages, max_tokens: self._answer(
                     snap, messages, max_tokens, engine))
             if self.stop_event.is_set():

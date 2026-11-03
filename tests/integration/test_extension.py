@@ -110,6 +110,14 @@ class Extension(unittest.TestCase):
         state = wait_done()
         self.assertIn("[stopped: the answer was repeating itself", state["answer"])
 
+    def test_4c_find_issues_sends_exact_scan(self):
+        OFFICE.hook("press:quick:2")
+        state = wait_done()
+        user = mock_ciu.STATE.last_request["messages"][1]["content"]
+        self.assertIn("Issues found by exact checks:", user)
+        self.assertIn("Do not list every cell", user)
+        self.assertEqual(len(mock_ciu.STATE.requests), 1)      # no SQL step for the buttons
+
     def test_5_model_not_loaded(self):
         mock_ciu.STATE.state = "stopped"
         OFFICE.hook("press:quick:2")

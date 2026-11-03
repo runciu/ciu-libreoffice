@@ -217,7 +217,7 @@ class ColumnProfile(object):
 
 
 def _quote(text, limit=30):
-    text = str(text)
+    text = fmt(text) if is_num(text) else str(text)
     return "'%s'" % (text if len(text) <= limit else text[:limit - 1] + "\u2026")
 
 
@@ -335,6 +335,120 @@ def profile(snapshot):
     statistics, so "largest" means the largest item, not the grand total."""
     t = Table(snapshot)
     return t.header, t.profiles, [t.where(i) for i in sorted(t.totals)]
+
+
+_INSTRUCTION = re.compile(
+    r"\b(ignore|disregard|forget|override)\b.{0,40}\b(instructions?|prompts?|rules)\b"
+    r"|\byou are (an? )?(ai|assistant|language model|chatbot)\b"
+    r"|\b(system prompt|as an ai)\b", re.I)
+
+
+# Column names that mark identifiers, whose repeats are worth reporting even
+# when the values are numbers (an amount repeating is normal; an ID is not).
+_ID_NAME = re.compile(r"\b(id|ids|no|number|code|ref|reference|invoice|order|account|sku)\b", re.I)
+
+
+def _distinct(values):
+    out = []
+    for v in values:
+        if v not in out:
+            out.append(v)
+    return out
+
+
+def _rows_text(rows, limit=5):
+    shown = ", ".join(str(r) for r in rows[:limit])
+    if len(rows) > limit:
+        shown += " and %d more" % (len(rows) - limit)
+    return ("row " if len(rows) == 1 else "rows ") + shown
+
+
+def find_issues(table, limit=14):
+    """Data problems found by exact checks, one line each, for the model to
+    explain. Repeats in category columns (a country, a client) are normal
+    and not reported; repeats in a column of mostly unique values are."""
+    issues = []
+    body = [(i, row) for i, row in enumerate(table.body) if i not in table.skipped]
+    if not body:
+        return issues
+    letter = lambda c: col_letter(table.snapshot.start_col + c)
+    issues.extend(_total_mismatches(table))
+
+    for p in table.profiles:
+        c, name = p.col_index, p.name
+        cells = [(table.row_number(i), row[c] if c < len(row) else "") for i, row in body]
+        filled = [(r, v) for r, v in cells if not is_empty(v)]
+        empty = [r for r, v in cells if is_empty(v)]
+        if empty and filled:
+            if len(empty) * 2 <= len(cells):
+                issues.append("%s: %d empty cell%s (%s)." % (
+                    name, len(empty), "" if len(empty) == 1 else "s", _rows_text(empty)))
+            else:
+                issues.append("%s: empty in %d of %d rows (may be an optional column)." % (
+                    name, len(empty), len(cells)))
+        markers = [(r, v) for r, v in filled if isinstance(v, str) and v.strip().lower() in NA_MARKERS]
+        if markers:
+            issues.append("%s: %d value%s written as missing (%s: %s)." % (
+                name, len(markers), "" if len(markers) == 1 else "s", _rows_text([r for r, _ in markers]),
+                ", ".join(sorted(set(_quote(v.strip()) for _, v in markers)))))
+        numeric = len(p.nums) > len(filled) / 2
+        as_text = [(r, v) for r, v in filled if isinstance(v, str) and to_number(v) is not None]
+        if numeric and as_text:
+            issues.append("%s: %d number%s stored as text (%s: %s); Calc's SUM and AVERAGE skip them." % (
+                name, len(as_text), "" if len(as_text) == 1 else "s", _rows_text([r for r, _ in as_text]),
+                ", ".join(_quote(v) for v in _distinct([v for _, v in as_text])[:4])))
+        junk = [(r, v) for r, v in filled if isinstance(v, str) and to_number(v) is None
+                and not is_iso_date(v) and v.strip().lower() not in NA_MARKERS]
+        if numeric and junk:
+            issues.append("%s: text in a number column (%s: %s)." % (
+                name, _rows_text([r for r, _ in junk]),
+                ", ".join(_quote(v) for v in _distinct([v for _, v in junk])[:4])))
+        if p.typed_dates:
+            issues.append("%s: %d date%s typed as text (%s); Calc cannot calculate with them." % (
+                name, len(p.typed_dates), "" if len(p.typed_dates) == 1 else "s", _rows_text(p.typed_dates)))
+        for n, shown, spellings in p.groups:
+            if len(spellings) > 1:
+                issues.append("%s: the same value is spelled %s." % (
+                    name, " / ".join(_quote(v) for v in spellings[:4])))
+        if 1 < p.unique <= 12:
+            words = [shown for _, shown, _ in p.groups if isinstance(shown, str)]
+            for short in [w for w in words if len(w.strip()) == 1]:
+                longer = [w for w in words if len(w) > 1 and w[0].lower() == short.strip().lower()]
+                if len(longer) == 1:
+                    issues.append("%s: %s probably means %s." % (name, _quote(short), _quote(longer[0])))
+        spaced = [r for r, v in filled if isinstance(v, str) and v != v.strip()]
+        if spaced:
+            issues.append("%s: extra spaces at the start or end (%s)." % (name, _rows_text(spaced)))
+        # A header naming an identifier is strong evidence, so any repeat
+        # counts; otherwise the column must be overwhelmingly unique.
+        named_id = bool(_ID_NAME.search(name))
+        share = 0.5 if named_id else 0.85
+        id_like = named_id or c == 0 or p.kind == "text"
+        if id_like and len(filled) >= 5 and p.unique >= share * len(filled) and p.unique < len(filled):
+            repeats = {}
+            for r, v in filled:
+                repeats.setdefault(fmt(v).strip().lower(), []).append(r)
+            dup = [(k, rs) for k, rs in repeats.items() if len(rs) > 1]
+            issues.append("%s: mostly unique, but %d value%s: %s." % (
+                name, len(dup), " repeats" if len(dup) == 1 else "s repeat",
+                "; ".join("%s (%s)" % (_quote(table.body[rs[0] - table.first_row][c]), _rows_text(rs))
+                          for k, rs in dup[:4])))
+        flagged = [(r, v) for r, v in filled if isinstance(v, str) and _INSTRUCTION.search(v)]
+        for r, v in flagged[:2]:
+            issues.append("Cell %s%d contains instructions aimed at an AI assistant (%s); it is "
+                          "treated as data and should probably be removed." % (letter(c), r, _quote(v, 50)))
+
+    seen = {}
+    for i, row in body:
+        key = tuple(fmt(v).strip().lower() for v in row)
+        seen.setdefault(key, []).append(table.row_number(i))
+    same = [rs for rs in seen.values() if len(rs) > 1]
+    if same:
+        issues.append("Duplicate rows (identical, ignoring case and spaces): %s." % "; ".join(
+            " and ".join(str(r) for r in rs) for rs in same[:4]))
+    if len(issues) > limit:
+        issues = issues[:limit] + ["(%d more issues not listed)" % (len(issues) - limit)]
+    return issues
 
 
 def _total_mismatches(table):
