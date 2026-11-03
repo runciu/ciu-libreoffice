@@ -72,12 +72,23 @@ Total and subtotal rows are left out of statistics, queries and copies, and whol
 
 ## Install
 
-1. Download `ciu-libreoffice.oxt` from the Releases page, or build it with `python3 scripts/build_oxt.py`.
+1. [Download `ciu-libreoffice.oxt`](https://github.com/runciu/ciu-libreoffice/releases/latest/download/ciu-libreoffice.oxt) (the latest release), or build it with `python3 scripts/build_oxt.py`.
 2. Double-click the file, or go to **Tools > Extension Manager > Add**.
 3. Quit LibreOffice completely and reopen it.
 4. Open a spreadsheet and use the **CIU** menu. On macOS, the menu is in the menu bar at the top of the screen.
 
 The extension connects to `http://127.0.0.1:8674`. To use another address, set the `CIU_BASE_URL` environment variable.
+
+## Releasing
+
+Set the new version in `description.xml`, commit, then push a tag with the same number:
+
+```
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The Release workflow runs the unit tests, builds `ciu-libreoffice.oxt` and publishes it as a GitHub release. The download link above always points to the newest release.
 
 ## Project layout
 
