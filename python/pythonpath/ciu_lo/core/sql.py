@@ -95,8 +95,35 @@ MAX_LISTED_VALUES = 8
 MAX_LISTED_LENGTH = 24   # longer values are free text, never listed
 
 
+_YES_NO = {"y": "yes", "n": "no"}
+
+
+def stored_spellings(table):
+    """{(column, lowered text): text as stored in t}. Text spelled differently
+    only by case or spaces is stored in its most common spelling, so
+    paid = 'No' also finds 'no' and ' No '. In a yes/no column that also holds
+    the full words, 'Y' and 'N' are stored as them, so 'Y' cannot be read as
+    anything but yes."""
+    numeric = numeric_columns(table)
+    out = {}
+    for c in range(min(table.width, len(table.profiles))):
+        if c in numeric or table.column_kind(c) == "logical":
+            continue
+        groups = table.profiles[c].groups
+        shown_by_key = {shown.strip().lower(): shown for _, shown, _ in groups}
+        for _, shown, spellings in groups:
+            if len(spellings) > 1:
+                out[(c, shown.strip().lower())] = shown
+        if shown_by_key and set(shown_by_key) <= {"yes", "y", "no", "n"}:
+            for short, full in _YES_NO.items():
+                if short in shown_by_key and full in shown_by_key:
+                    out[(c, short)] = shown_by_key[full]
+    return out
+
+
 def describe_columns(table):
     cols = ["row (sheet row number)"]
+    spelling = stored_spellings(table)
     for c, name in enumerate(column_names(table)):
         full = table.names[c]
         label = full.split(" (", 1)[1][:-1] if " (" in full else ""
@@ -106,9 +133,14 @@ def describe_columns(table):
         if p is not None and p.kind == "text" and 1 < p.unique <= MAX_LISTED_VALUES \
                 and p.unique < p.count and table.column_kind(c) != "logical" \
                 and all(len(shown) <= MAX_LISTED_LENGTH for _, shown, _ in p.groups):
-            # Small category columns: listing the values stops the model
-            # guessing spellings (and shows 'Y' beside 'Yes').
-            listed = ", ".join("'%s'" % shown for _, shown, _ in p.groups)
+            # Small category columns: listing the values as stored stops the
+            # model guessing spellings.
+            stored = []
+            for _, shown, _ in p.groups:
+                value = spelling.get((c, shown.strip().lower()), shown)
+                if value not in stored:
+                    stored.append(value)
+            listed = ", ".join("'%s'" % v for v in stored)
             bits.append("values: %s%s" % (listed, ", some empty" if p.missing else ""))
         cols.append("%s (%s)" % (name, "; ".join(bits)) if bits else name)
     return ", ".join(cols)
@@ -397,15 +429,7 @@ def _load(table):
     conn.execute("CREATE TABLE t (row INTEGER, %s)" % ", ".join('"%s"' % n for n in names))
     numeric = numeric_columns(table)
     logical = {c for c in range(table.width) if table.column_kind(c) == "logical"}
-    # Text spelled differently only by case or spaces is stored in its most
-    # common spelling, so paid = 'No' also finds 'no' and ' No '.
-    spelling = {}
-    for c in range(table.width):
-        if c in numeric or c in logical or c >= len(table.profiles):
-            continue
-        for _, shown, spellings in table.profiles[c].groups:
-            if len(spellings) > 1:
-                spelling[(c, shown.lower())] = shown
+    spelling = stored_spellings(table)
     merged = {}
     dropped = {}
     data = []

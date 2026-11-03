@@ -131,6 +131,25 @@ class Results(unittest.TestCase):
         self.assertIn("\nAfrica", out)
 
 
+class YesNo(unittest.TestCase):
+    ROWS = [["Invoice", "Paid", "Amount"], ["I1", "Yes", 10.0], ["I2", "Y", 5.0],
+            ["I3", "no", 7.0], ["I4", "No", 3.0], ["I5", "No", 2.0], ["I6", "", 1.0]]
+
+    def test_short_forms_stored_as_full_words(self):
+        snap = snapshot(self.ROWS)
+        out = run("SELECT COUNT(*) FROM t WHERE paid = 'Yes'", snap)
+        self.assertTrue(out.endswith("\n2"), out)
+        self.assertIn("'Y' as 'Yes'", out)
+        self.assertIn("paid (Paid; values: 'No', 'Yes', some empty)",
+                      S.table_note(context.Table(snap)))
+
+    def test_short_forms_kept_without_full_words(self):
+        rows = [["Code", "Flag"], ["a", "Y"], ["b", "N"], ["c", "Y"]]
+        self.assertTrue(run("SELECT COUNT(*) FROM t WHERE flag = 'Y'", snapshot(rows)).endswith("\n2"))
+        rows = [["Name", "Size"], ["a", "Y"], ["b", "Yes"], ["c", "XL"], ["d", "Y"]]
+        self.assertTrue(run("SELECT COUNT(*) FROM t WHERE size = 'Y'", snapshot(rows)).endswith("\n2"))
+
+
 class EmptyText(unittest.TestCase):
     ROWS = [["Invoice", "Paid", "Amount"], ["I1", "No", 10.0], ["I2", "", 5.0],
             ["I3", "Yes", 7.0], ["I4", "no", 3.0]]
