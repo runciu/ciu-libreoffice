@@ -222,8 +222,9 @@ def instructions(table):
         '<meaning>", "sql": "SELECT ..."}\n'
         "The selection is the table t, described with the selection.\n"
         "- values: for each text column your WHERE tests, what each listed value and an "
-        "empty cell mean for this question, read as a person would. The SQL must match "
-        "it, empty cells included.\n"
+        "empty cell mean for this question, read as a person would. If nothing makes "
+        "the meaning of empty clear, write empty = unclear and give empty cells their "
+        "own count or sum in the SQL instead of deciding. The SQL must match it.\n"
         "- %s\n"
         "- Return at most %d rows and include the name column so results are "
         "readable.\n"
