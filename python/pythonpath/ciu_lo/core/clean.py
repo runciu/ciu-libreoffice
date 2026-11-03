@@ -1,13 +1,14 @@
 """Clean data into a new sheet.
 
-The model reads what values mean, from each column's distinct values only:
-'Y' is Yes, 'settled' is Paid, 'TBC' is unknown. It replies with rules, and
-code applies them to every row, so the work is the same for 20 rows or
-20,000 and no value is retyped by the model. Fixes that need no judgement
-(spacing, case, numbers and dates stored as text) are made by code alone.
+The model interprets, one column at a time: what the column holds (yes/no,
+a category, names, identifiers), its standard values, what each other
+value means ('yse' and 'Y' are Yes, 'TBC' is unknown) and what an empty
+cell means. Code checks every answer, applies the rules to every row, and
+sorts the changes for the preview: spelling fixes, changes of meaning to
+check, and values left unresolved. Fixes that need no judgement (spacing,
+case, numbers and dates stored as text) are made by code alone.
 """
 
-import json
 import re
 
 from . import sql as S
@@ -20,54 +21,57 @@ SHEET = "Cleaned"
 MAX_VALUES = 30         # a column with more distinct values is free text or IDs
 MAX_VALUE_LENGTH = 40
 MAX_NEW_LENGTH = 60
-REPLY_TOKENS = 600
+MAX_EXAMPLES = 4        # rows shown for rare values
+REPLY_TOKENS = 400
+
+KINDS = ("yes/no", "category", "name", "identifier", "free text", "amount", "other")
+_STANDARDISED = ("yes/no", "category")
 
 SCHEMA = {
     "type": "object",
     "properties": {
-        "columns": {
+        "kind": {"type": "string", "enum": list(KINDS)},
+        "standard": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
+        "rules": {
             "type": "array",
-            "maxItems": 20,
+            "maxItems": MAX_VALUES,
             "items": {
                 "type": "object",
-                "properties": {
-                    "column": {"type": "string"},
-                    "rules": {
-                        "type": "array",
-                        "maxItems": MAX_VALUES,
-                        "items": {
-                            "type": "object",
-                            "properties": {"from": {"type": "string"},
-                                           "to": {"type": "string"}},
-                            "required": ["from", "to"],
-                        },
-                    },
-                },
-                "required": ["column", "rules"],
+                "properties": {"from": {"type": "string"}, "to": {"type": "string"}},
+                "required": ["from", "to"],
             },
         },
+        "blank_means": {"type": "string"},
     },
-    "required": ["columns"],
+    "required": ["kind", "rules"],
 }
 
-SYSTEM = (
-    "You standardise messy spreadsheet values so they can be counted and filtered. "
-    "For each column you get its distinct values with how often each occurs. Reply "
-    "with rules that rewrite values to a standard form:\n"
-    "- Values that mean the same thing become one value, the clearest spelling already "
-    "in the column: abbreviations (Y to Yes), synonyms (settled to Paid), typos "
-    "(Lodnon to London).\n"
-    "- Markers of a missing or unknown value ('N/A', '-', 'TBC', 'unknown') become "
-    "empty: write \"\" as to.\n"
-    "- In a number column, a word becomes a number only when its meaning is certain "
-    "('nil' or 'none' is 0, 'twelve' is 12).\n"
-    "- Leave out values that are already standard and any value you are unsure about. "
-    "Never change a value into something with a different meaning.\n"
-    "- Use the column names and values exactly as listed. Leave out columns with "
-    "nothing to change.\n"
-    "Reply as JSON, for example:\n"
-    '{"columns": [{"column": "status", "rules": [{"from": "done.", "to": "Done"}, '
-    '{"from": "complete", "to": "Done"}, {"from": "?", "to": ""}]}]}'
+TEXT_SYSTEM = (
+    "You help clean one column of a spreadsheet. You get its header, each distinct "
+    "value with how often it occurs, and rows where rare values occur. Data is often "
+    "messy: read every value as a person would. Reply as JSON:\n"
+    "- kind: yes/no; category (a few repeated labels); name (people, companies, "
+    "places); identifier (codes, IDs); free text; or other.\n"
+    "- standard: for yes/no and category, the correct value for each real meaning, "
+    "spelled as most cells already spell it.\n"
+    "- rules: every other value mapped to the value it means: typos (yse to Yes), "
+    "abbreviations (Y to Yes), synonyms (settled to Paid). A marker of a missing or "
+    "unknown value ('N/A', '-', 'TBC', '?') maps to \"\". For names, map only clear "
+    "misspellings to another value in the list. Leave out values you cannot place.\n"
+    "- blank_means: \"\" when an empty cell is just missing, or the standard value an "
+    "empty cell stands for when the column makes that clear.\n"
+    "Example: {\"kind\": \"category\", \"standard\": [\"Done\", \"Open\"], \"rules\": "
+    "[{\"from\": \"done.\", \"to\": \"Done\"}, {\"from\": \"opne\", \"to\": \"Open\"}, "
+    "{\"from\": \"?\", \"to\": \"\"}], \"blank_means\": \"\"}"
+)
+
+NUMBER_SYSTEM = (
+    "You help clean one number column of a spreadsheet. Some of its cells hold text "
+    "instead of a number. For each text value, say the number it means, or \"\" when "
+    "the value is unknown or missing ('TBC', 'N/A', '-'). Give a number only when the "
+    "meaning is certain ('nil' or 'none' is 0, 'twelve' is 12). Reply as JSON with "
+    "kind \"amount\", for example: {\"kind\": \"amount\", \"rules\": [{\"from\": \"nil\", "
+    "\"to\": \"0\"}, {\"from\": \"TBC\", \"to\": \"\"}]}"
 )
 
 
@@ -81,14 +85,11 @@ class Candidate(object):
         self.numeric = numeric
         self.values = values      # [(text, count)], most common first
         self.empty = empty
+        self.examples = []        # (value, row text) for rare values
 
-    def line(self):
-        listed = ", ".join("'%s' x%d" % (v, n) for v, n in self.values)
-        if self.empty:
-            listed += ", empty x%d" % self.empty
-        what = "number column; these cells are not numbers" if self.numeric else "text"
-        label = "%s, " % self.label if self.label else ""
-        return "- %s (%s%s): %s" % (self.name, label, what, listed)
+    def count(self, value):
+        key = value.lower()
+        return sum(n for v, n in self.values if v.lower() == key)
 
 
 def _label(table, c):
@@ -126,114 +127,248 @@ def candidates(table):
             continue  # codes such as 00123 or INV-7: nothing to interpret
         if values:
             out.append(Candidate(c, names[c], _label(table, c), False, values, p.missing))
+    for cand in out:
+        cand.examples = _examples(table, cand)
     return out
 
 
-def build_messages(cands, guidance, n_ctx, scale=1.0):
-    """System rules, and the values in the user message: cell text never goes
-    in the system prompt. Columns that do not fit the window are left out
-    and returned, so the preview can say they were not checked."""
-    room = (n_ctx - REPLY_TOKENS - estimate_tokens(SYSTEM) - 120) * scale
-    kept, skipped, used = [], [], 0
-    for cand in sorted(cands, key=lambda k: len(k.values)):
-        size = estimate_tokens(cand.line())
-        if used + size <= room:
-            kept.append(cand)
-            used += size
-        else:
-            skipped.append(cand)
-    kept.sort(key=lambda k: k.col)
-    user = "Columns:\n" + "\n".join(k.line() for k in kept)
+def _examples(table, cand):
+    """A row for each of the rarest values, so a value such as 'TBC' is read
+    beside the rest of its row ('awaiting quote' in Notes)."""
+    rare = [v for v, n in sorted(cand.values, key=lambda x: x[1]) if n <= 2][:MAX_EXAMPLES]
+    out = []
+    for value in rare:
+        for i, row in enumerate(table.body):
+            if i in table.skipped or cand.col >= len(row):
+                continue
+            if isinstance(row[cand.col], str) and row[cand.col].strip().lower() == value.lower():
+                # Words say most about a value (a note such as 'awaiting
+                # quote'), so text cells come before numbers, dates and codes.
+                others = [c for c, v in enumerate(row) if c != cand.col and not is_empty(v)]
+                others.sort(key=lambda c: (not _wordy(row[c]), c))
+                cells = []
+                for c in sorted(others[:6]):
+                    text = fmt(row[c])
+                    cells.append("%s %s" % (_label(table, c) or table.names[c],
+                                            text if len(text) <= 25 else text[:24] + "\u2026"))
+                out.append((value, "row %d: %s" % (table.row_number(i), " | ".join(cells))))
+                break
+    return out
+
+
+def _wordy(v):
+    return isinstance(v, str) and to_number(v) is None and not _CODE.match(v.strip()) \
+        and any(ch.isalpha() for ch in v)
+
+
+def messages(cand, guidance=""):
+    """One small request per column. Cell text goes in the user message only."""
+    lines = ["Column: %s%s" % (cand.label or cand.name,
+                               " (a number column)" if cand.numeric else "")]
+    listed = ", ".join("'%s' x%d" % (v, n) for v, n in cand.values)
+    if cand.empty:
+        listed += ", empty x%d" % cand.empty
+    lines.append(("Text values: " if cand.numeric else "Values: ") + listed)
+    if cand.examples:
+        lines.append("Rows with rare values:")
+        lines += ["- '%s' in %s" % ex for ex in cand.examples]
     if guidance:
-        user += "\n\nInstructions from the user: " + guidance
-    return [{"role": "system", "content": SYSTEM},
-            {"role": "user", "content": user}], kept, skipped
+        lines.append("Instructions from the user: " + guidance)
+    system = NUMBER_SYSTEM if cand.numeric else TEXT_SYSTEM
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": "\n".join(lines)}]
 
 
-def parse_rules(raw, cands):
-    """({(column, value lowered): new value}, [(column name, text, why)] of
-    rules that were not used). A new value is None for empty, a float in a
-    number column, else text."""
+def fits(cand, n_ctx, guidance=""):
+    n_ctx = n_ctx or 4096
+    used = sum(estimate_tokens(m["content"]) for m in messages(cand, guidance))
+    return used + REPLY_TOKENS + 50 < n_ctx
+
+
+class Decision(object):
+    """What the model said about one column, after checking."""
+
+    def __init__(self, cand, kind="other", standard=(), rules=None, blank=None,
+                 rejected=()):
+        self.cand = cand
+        self.kind = kind
+        self.standard = list(standard)
+        self.rules = rules or {}          # value lowered -> new value (None is empty)
+        self.blank = blank                # value an empty cell becomes, or None
+        self.rejected = list(rejected)    # (value, why)
+
+    def unresolved(self):
+        """Values still outside the standard ones after the rules."""
+        if self.kind not in _STANDARDISED or not self.standard:
+            return []
+        known = {s.lower() for s in self.standard}
+        return [(v, n) for v, n in self.cand.values
+                if v.lower() not in known and v.lower() not in self.rules]
+
+
+def parse(raw, cand):
     from .plan import extract_json
     try:
         data = extract_json(raw or "")
     except Exception:
         data = None
     if not isinstance(data, dict):
-        return {}, []
-    by_name = {}
-    for k in cands:
-        by_name[k.name.lower()] = k
-        if k.label:
-            by_name.setdefault(k.label.lower(), k)
+        return Decision(cand, rejected=[("", "the reply could not be read")])
+    kind = data.get("kind") if data.get("kind") in KINDS else "other"
+    if cand.numeric:
+        kind = "amount"
+    listed = {v.lower(): v for v, _ in cand.values}
+    standard = []
+    if kind in _STANDARDISED:
+        for s in data.get("standard") or []:
+            s = str(s).strip()
+            if s and len(s) <= MAX_NEW_LENGTH and s.lower() not in {x.lower() for x in standard}:
+                standard.append(s)
+    allowed = {s.lower(): s for s in standard} or dict(listed)
+
+    def target(new):
+        """The checked replacement, or a reason it cannot be used."""
+        if new == "":
+            return None, None
+        if cand.numeric:
+            n = to_number(new)
+            return (n, None) if n is not None else (None, "'%s' is not a number" % new)
+        if new.lower() in allowed:
+            return allowed[new.lower()], None
+        return None, "'%s' is not one of the column's values" % new
+
     rules, rejected = {}, []
-    for col in data.get("columns") or []:
-        if not isinstance(col, dict):
+    for rule in data.get("rules") or []:
+        if not isinstance(rule, dict):
             continue
-        cand = by_name.get(str(col.get("column") or "").strip().lower())
-        if cand is None:
+        old = str(rule.get("from") or "").strip()
+        new = str(rule.get("to") if rule.get("to") is not None else "").strip()
+        if old.lower() not in listed:
+            rejected.append((old, "not a value in the column"))
             continue
-        listed = {v.lower(): v for v, _ in cand.values}
-        for rule in col.get("rules") or []:
-            if not isinstance(rule, dict):
-                continue
-            old = str(rule.get("from") or "").strip()
-            new = str(rule.get("to") if rule.get("to") is not None else "").strip()
-            if old.lower() not in listed:
-                rejected.append((cand.name, old, "not a value in the column"))
-                continue
-            if new == "":
-                value = None
-            elif cand.numeric:
-                value = to_number(new)
-                if value is None:
-                    rejected.append((cand.name, old, "'%s' is not a number" % new))
-                    continue
-            elif len(new) > MAX_NEW_LENGTH:
-                rejected.append((cand.name, old, "replacement too long"))
-                continue
-            else:
-                value = new
-            if value == listed[old.lower()]:
-                continue
-            rules[(cand.col, old.lower())] = value
-    return rules, rejected
+        value, why = target(new)
+        if why:
+            rejected.append((old, why))
+            continue
+        if value is not None and fmt(value) == listed[old.lower()]:
+            continue
+        rules[old.lower()] = value
+    blank = None
+    said = str(data.get("blank_means") or "").strip()
+    if said and cand.empty and not cand.numeric:
+        value, why = target(said)
+        if why:
+            rejected.append(("empty", why))
+        else:
+            blank = value
+    return Decision(cand, kind, standard, rules, blank, rejected)
+
+
+def _distance(a, b):
+    """Edits between two strings, a swap of neighbours counting as one."""
+    d = [[i + j if i * j == 0 else 0 for j in range(len(b) + 1)] for i in range(len(a) + 1)]
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
+            d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1,
+                          d[i - 1][j - 1] + (a[i - 1] != b[j - 1]))
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                d[i][j] = min(d[i][j], d[i - 2][j - 2] + 1)
+    return d[-1][-1]
+
+
+def is_spelling(old, new):
+    """True when old reads as a typo or abbreviation of new: 'yse' and 'Y'
+    for 'Yes', 'Lodnon' for 'London', 'compl.' for 'Complete'. Anything else
+    is a change of meaning, which the preview asks the user to check."""
+    if not isinstance(new, str):
+        return False
+    o = re.sub(r"[^0-9a-z]", "", old.lower())
+    n = re.sub(r"[^0-9a-z]", "", new.lower())
+    if not o or not n:
+        return False
+    if n.startswith(o) and (len(o) <= 3 or old.rstrip().endswith(".")):
+        return True
+    return _distance(o, n) <= (1 if len(n) <= 4 else 2)
 
 
 class Cleaning(object):
     """A proposed clean: the copy, and what was changed to make it."""
 
-    def __init__(self, table, rules, rejected=(), skipped=()):
+    def __init__(self, table, decisions=(), skipped=()):
         self.table = table
+        self.decisions = list(decisions)
+        rules = {}
+        for d in self.decisions:
+            for old, new in d.rules.items():
+                rules[(d.cand.col, old)] = new
+            if d.blank is not None:
+                rules[(d.cand.col, "")] = d.blank
         self.rules = rules
         names = S.column_names(table)
         self.sql = "SELECT %s FROM t ORDER BY row" % ", ".join('"%s"' % n for n in names)
         self.result = S.run_to_sheet(self.sql, table, rules)
-        self.meaning = [n for n in self.result.notes if n.startswith("Changed in ")]
         self.fixes = [n for n in self.result.notes if not n.startswith("Changed in ")]
         self.fixes += _typed_fixes(table, names)
-        self.rejected = list(rejected)
         self.skipped = [k.name for k in skipped]
+        self.spelling, self.check, self.left = [], [], []
+        for d in self.decisions:
+            name = d.cand.name
+            shown = {v.lower(): v for v, _ in d.cand.values}
+            spell = [(old, new) for old, new in d.rules.items() if is_spelling(shown[old], new)]
+            meaning = [(old, new) for old, new in d.rules.items() if (old, new) not in spell]
+            if spell:
+                self.spelling.append("%s: %s" % (name, _changes(d, spell)))
+            if meaning:
+                self.check.append("%s: %s" % (name, _changes(d, meaning)))
+            if d.blank is not None:
+                self.check.append("%s: empty cells read as '%s' (%d cell%s)" % (
+                    name, fmt(d.blank), d.cand.empty, "" if d.cand.empty == 1 else "s"))
+            left = d.unresolved()
+            if left:
+                self.left.append("%s: %s (not one of %s)" % (
+                    name, ", ".join("'%s' x%d" % x for x in left[:6]),
+                    ", ".join("'%s'" % s for s in d.standard)))
 
     @property
     def changes(self):
-        return bool(self.meaning or self.fixes)
+        return bool(self.rules or self.fixes)
 
     def describe(self, sheet=SHEET):
         r = self.result
         lines = ["Proposed clean (not applied yet): a cleaned copy in a new sheet '%s', "
                  "%d rows x %d columns." % (sheet, len(r.rows), len(r.headers))]
-        if self.meaning:
-            lines += ["", "Values read by CIU (check these):"] + ["  " + m for m in self.meaning]
+        read = ["%s: %s%s" % (d.cand.name, d.kind,
+                              " (%s)" % ", ".join(d.standard) if d.standard else "")
+                for d in self.decisions]
+        if read:
+            lines += ["", "How CIU read the columns: " + "; ".join(read) + "."]
+        if self.check:
+            lines += ["", "Check these (CIU's reading of what values mean):"]
+            lines += ["  " + x for x in self.check]
+        if self.spelling:
+            lines += ["", "Spelling and abbreviations:"] + ["  " + x for x in self.spelling]
+        if self.left:
+            lines += ["", "Unresolved, left as they are:"] + ["  " + x for x in self.left]
         if self.fixes:
             lines += ["", "Standard fixes:"] + ["  " + f for f in self.fixes]
-        if self.rejected:
-            lines += ["", "Rules not used:"] + ["  %s '%s': %s" % x for x in self.rejected[:6]]
+        rejected = [(d.cand.name, v, why) for d in self.decisions for v, why in d.rejected]
+        if rejected:
+            lines += ["", "Rules not used:"] + ["  %s '%s': %s" % x for x in rejected[:6]]
         if self.skipped:
-            lines += ["", "Not checked (did not fit the context): %s" % ", ".join(self.skipped)]
+            lines += ["", "Not checked: %s" % ", ".join(self.skipped)]
         if r.totals:
             lines += ["", "Total rows are not copied: %s." % ", ".join(r.totals[:4])]
         return "\n".join(lines)
+
+
+def _changes(decision, pairs):
+    out = []
+    for old, new in sorted(pairs, key=lambda p: -decision.cand.count(p[0])):
+        n = decision.cand.count(old)
+        shown = next(v for v, _ in decision.cand.values if v.lower() == old)
+        out.append("'%s' to %s%s" % (shown, "empty" if new is None else "'%s'" % fmt(new),
+                                     " (%d cells)" % n if n > 1 else ""))
+    return ", ".join(out)
 
 
 def _typed_fixes(table, names):
@@ -255,7 +390,3 @@ def _typed_fixes(table, names):
                 names[c], "1 date" if n == 1 else "%d dates" % n,
                 "s a date" if n == 1 else " dates"))
     return out
-
-
-def no_reply():
-    return json.dumps({"columns": []})

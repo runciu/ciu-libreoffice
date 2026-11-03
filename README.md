@@ -25,7 +25,15 @@ If LibreOffice's Python has no SQLite, a simpler built-in query form is used ins
 | `fill_formula` | a formula filled down a column or across a row, like dragging the fill handle |
 | `set_values` | plain text or numbers in a range |
 
-**Clean data.** The **Clean data** button makes a cleaned copy in a new sheet. CIU looks at the distinct values of each category column and decides what they mean: `Y` and `settled` as `Yes`, `Brite` as `Bright`, `TBC` as empty. Code then applies those rules to every row, so it works the same on 20 rows or 20,000 and the model never retypes your data. Fixes that need no judgement are made by code alone: outer spaces, case differences, and numbers and dates stored as text. The preview lists every change with how many cells it affects, keeping the values CIU interpreted apart from the standard fixes, and nothing happens until you press **Create sheet**. To change a rule, type for example `Clean data: keep TBC as text` and press Clean data again. Find issues suggests Clean data when it would fix something.
+**Clean data.** The **Clean data** button makes a cleaned copy in a new sheet. CIU reads the sheet one column at a time, the way a person would. For each column it decides what the column holds (yes/no, a category, names, identifiers, free text), which values are the standard ones, what every other value means (`yse` and `Y` are `Yes`, `settled` is `Yes`, `TBC` is unknown), and what an empty cell means. For rare values it also sees the row they sit in, so `TBC` is read next to a note such as "awaiting quote". Code checks every answer (a value must exist in the column, and a replacement must be one of the column's standard values or a number in a number column), then applies the rules to every row, so the model never retypes your data.
+
+The preview sorts the changes so you know where to look:
+- **Check these:** changes of meaning (`settled` to `Yes`, `TBC` to empty) and what empty cells are read as.
+- **Spelling and abbreviations:** values that are near-identical to the standard one (`yse`, `Y`, `Lodnon`).
+- **Unresolved:** values still outside the standard ones, left as they are and listed, never silently kept.
+- **Standard fixes:** what code fixes without judgement: outer spaces, case differences, numbers and dates stored as text.
+
+Nothing happens until you press **Create sheet**. To change a decision, type it, for example `Clean data: settled means part paid`, and press Clean data again. Find issues suggests Clean data when it would fix something.
 
 **Clean into a new sheet.** Ask for things like "remove duplicate countries", "make a copy without the rows that have missing values", "fill missing Units with the average", or "a table of total population per region". CIU writes one SQL `SELECT` (in the same sandbox as Ask), and the result goes to a **new sheet**; the original sheet is never changed. The preview shows how many rows are kept, names the rows left out when it can, says total rows are not copied, and shows the SQL and the first rows. **Create sheet** adds the new sheet next to the original, with dates and percentages formatted as in the source, and one undo removes it. The copy holds values, not formulas.
 

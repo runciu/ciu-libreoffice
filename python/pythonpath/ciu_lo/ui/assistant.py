@@ -279,28 +279,30 @@ class AssistantDialog(object):
                 return
             table = Table(snap)
             cands = cleanmod.candidates(table)
-            rules, rejected, skipped = {}, [], []
-            if cands:
-                n = len(cands)
-                self.ui.post(lambda: self._show_answer(
-                    "Reading the values in %d column%s..." % (n, "" if n == 1 else "s")))
-                asked = {}
-
-                def build(scale):
-                    messages, kept, left = cleanmod.build_messages(cands, guidance,
-                                                                   status.n_ctx, scale)
-                    asked["kept"], asked["left"] = kept, left
-                    return messages, cleanmod.REPLY_TOKENS
-
-                raw = self._fit_and_send(build, lambda messages, max_tokens: self.client.chat_json(
-                    messages, cleanmod.SCHEMA, max_tokens=max_tokens))
-                rules, rejected = cleanmod.parse_rules(raw, asked["kept"])
-                skipped = asked["left"]
+            decisions, skipped = [], []
+            for i, cand in enumerate(cands):
+                if self.stop_event.is_set():
+                    break
+                label = cand.label or cand.name
+                self.ui.post(lambda i=i, label=label: self._show_answer(
+                    "Reading column %d of %d: %s..." % (i + 1, len(cands), label)))
+                if not cleanmod.fits(cand, status.n_ctx, guidance):
+                    skipped.append(cand)
+                    continue
+                try:
+                    raw = self.client.chat_json(cleanmod.messages(cand, guidance), cleanmod.SCHEMA,
+                                                max_tokens=cleanmod.REPLY_TOKENS)
+                except CIUError as e:
+                    if not e.context_full:
+                        raise
+                    skipped.append(cand)
+                    continue
+                decisions.append(cleanmod.parse(raw, cand))
             if self.stop_event.is_set():
                 self.ui.post(lambda: self._show_answer("Stopped. Nothing was changed."))
                 return
             try:
-                cleaning = cleanmod.Cleaning(table, rules, rejected, skipped)
+                cleaning = cleanmod.Cleaning(table, decisions, skipped)
             except QueryError as e:
                 msg = str(e)
                 self.ui.post(lambda: self._show_answer("Could not clean this selection: " + msg))
@@ -319,8 +321,8 @@ class AssistantDialog(object):
         if not cleaning.changes:
             lines = ["Nothing to clean: no values to standardise, no spacing or case "
                      "differences, and no numbers or dates stored as text."]
-            if cleaning.rejected:
-                lines += ["", "Rules not used:"] + ["  %s '%s': %s" % x for x in cleaning.rejected[:6]]
+            if cleaning.left:
+                lines += ["", "Unresolved, left as they are:"] + ["  " + x for x in cleaning.left]
             self._show_answer("\n".join(lines))
             return
         result = cleaning.result
@@ -344,7 +346,7 @@ class AssistantDialog(object):
         try:
             table = Table(snap)
             if any(k.numeric for k in cleanmod.candidates(table)) or \
-                    cleanmod.Cleaning(table, {}).changes:
+                    cleanmod.Cleaning(table).changes:
                 return ("\n\nTip: Clean data can make a cleaned copy (consistent values, "
                         "numbers and dates stored as text fixed) for you to check first.")
         except Exception:

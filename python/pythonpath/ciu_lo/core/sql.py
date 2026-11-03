@@ -421,8 +421,8 @@ def numeric_columns(table):
 
 def _load(table, rules=None):
     """Table t from the data rows. With rules ({(column, value lowered):
-    new value}, from a clean), text is also trimmed, each rule replaces its
-    value, and text in a number column that no rule covers stays text
+    new value}, from a clean; value "" is an empty cell), each rule replaces
+    its value, and text in a number column that no rule covers stays text
     instead of becoming missing, so cleaning never loses a value."""
     if not AVAILABLE:
         raise QueryError("SQLite is not available in this LibreOffice.")
@@ -449,6 +449,12 @@ def _load(table, rules=None):
                 # paid = 'Yes' miss ' Yes '.
                 trimmed[c] = trimmed.get(c, 0) + 1
                 v = v.strip()
+            if rules is not None and is_empty(v) and (c, "") in rules:
+                new = rules[(c, "")]
+                applied.setdefault((c, "", new), 0)
+                applied[(c, "", new)] += 1
+                values.append(new)
+                continue
             if rules is not None and isinstance(v, str) and not is_empty(v):
                 key = (c, fmt(v).lower())
                 if key in rules:

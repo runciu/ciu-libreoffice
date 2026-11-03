@@ -280,24 +280,26 @@ class Extension(unittest.TestCase):
         ctrl = self.doc.getCurrentController()
         ctrl.setActiveSheet(messy)
         ctrl.select(messy.getCellRangeByName("A1:C6"))
-        mock_ciu.STATE.plan_reply = json.dumps({"columns": [
-            {"column": "paid", "rules": [{"from": "Y", "to": "Yes"}, {"from": "Maybe", "to": "No"}]},
-            {"column": "amount", "rules": [{"from": "TBC", "to": ""}]}]})
+        mock_ciu.STATE.plan_replies = [
+            json.dumps({"kind": "yes/no", "standard": ["Yes", "No"],
+                        "rules": [{"from": "Y", "to": "Yes"}, {"from": "Maybe", "to": "No"}]}),
+            json.dumps({"kind": "amount", "rules": [{"from": "TBC", "to": ""}]})]
         try:
             OFFICE.hook("prompt:Clean data: TBC means unknown")
             OFFICE.hook("press:clean")
             state = wait_done()
-            req = mock_ciu.STATE.last_request
-            self.assertIn("columns", json.dumps(req["response_format"]))
-            self.assertNotIn("TBC", req["messages"][0]["content"].replace("'TBC'", ""))
-            user = req["messages"][1]["content"]
-            self.assertIn("- paid (Paid, text): 'No' x2, 'Yes' x2, 'Y' x1", user)
-            self.assertIn("- amount (Amount, number column; these cells are not numbers): 'TBC' x1", user)
+            paid, amount = mock_ciu.STATE.requests[-2:]
+            self.assertIn("kind", json.dumps(paid["response_format"]))
+            self.assertNotIn("TBC", paid["messages"][0]["content"].replace("'TBC'", ""))
+            self.assertIn("Column: Paid\nValues: 'No' x2, 'Yes' x2, 'Y' x1", paid["messages"][1]["content"])
+            user = amount["messages"][1]["content"]
+            self.assertIn("Column: Amount (a number column)\nText values: 'TBC' x1", user)
             self.assertIn("Instructions from the user: TBC means unknown", user)
             answer = state["answer"]
             self.assertIn("a cleaned copy in a new sheet 'Cleaned', 5 rows x 3 columns", answer)
-            self.assertIn("Changed in paid: 'Y' to 'Yes'.", answer)
-            self.assertIn("Changed in amount: 'TBC' to empty.", answer)
+            self.assertIn("How CIU read the columns: paid: yes/no (Yes, No); amount: amount.", answer)
+            self.assertIn("Spelling and abbreviations:\n  paid: 'Y' to 'Yes'", answer)
+            self.assertIn("Check these (CIU's reading of what values mean):\n  amount: 'TBC' to empty", answer)
             self.assertIn("Trimmed spaces in paid (1 cell).", answer)
             self.assertIn("amount: 1 number stored as text becomes a number.", answer)
             self.assertIn("paid 'Maybe': not a value in the column", answer)
