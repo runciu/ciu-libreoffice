@@ -43,7 +43,7 @@ class Results(unittest.TestCase):
 
     def test_percent_text_is_numeric(self):
         out = run("SELECT a, d FROM t ORDER BY d LIMIT 1")
-        self.assertIn("Bulgaria | -0.44", out)
+        self.assertIn("Bulgaria | -0.0044", out)
         self.assertIn("COUNT(*)\n2", run("SELECT COUNT(*) FROM t WHERE d < 0").replace(" ", ""))
 
     def test_text_in_number_column_is_null(self):
@@ -53,6 +53,27 @@ class Results(unittest.TestCase):
         self.assertIn("\n7.025", run("SELECT AVG(b) FROM t", snap))
         self.assertIn("\n2", run("SELECT COUNT(*) FROM t WHERE b IS NULL", snap))
         self.assertIn("\n1", run("SELECT COUNT(*) FROM t WHERE c = '-'", snap))
+
+    def test_types_from_the_quirks_workbook(self):
+        rows = [["Invoice", "Account", "Due", "Amount", "VAT", "Paid", "Remote"],
+                ["I1", "00123", "2026-10-02", 1200.0, 0.2, "Yes", "TRUE"],
+                ["I2", "00456", "2026-11-15", "\u00a31,200.50", 0.0, "", "FALSE"],
+                ["", "", "", "", "", "", ""],
+                ["I3", "00123", "2026-12-24", "(120.00)", 0.2, "no", "TRUE"],
+                ["I4", "00777", "2026-12-02", "TBC", 0.05, "Y", "FALSE"]]
+        snap = context.Snapshot("d", "S", 0, 0, rows, kinds={4: "percent", 6: "logical"})
+        out = run("SELECT a FROM t WHERE b = '00123' ORDER BY row", snap)
+        self.assertIn("I1\nI3", out)
+        self.assertIn("\n2280.5", run("SELECT SUM(d) FROM t", snap))
+        self.assertIn("Column d: 1 value could not be read as a number and was treated as "
+                      "missing ('TBC').", run("SELECT SUM(d) FROM t", snap))
+        self.assertIn("I3\nI4", run("SELECT a FROM t WHERE c >= '2026-12-01' ORDER BY row", snap))
+        self.assertIn("COUNT(*) | SUM(g)\n4 | 2", run("SELECT COUNT(*), SUM(g) FROM t", snap))
+        text = S.instructions(context.Table(snap))
+        self.assertIn("c (Due, date)", text)
+        self.assertIn("e (VAT, fraction shown as %)", text)
+        self.assertIn("Dates are text like '2026-10-02'", text)
+        self.assertIn("TRUE/FALSE cells are 1 and 0", text)
 
     def test_row_column_is_sheet_row(self):
         self.assertIn("9 | Nigeria", run("SELECT row, a FROM t WHERE a = 'Nigeria'"))

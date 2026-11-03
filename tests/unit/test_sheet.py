@@ -54,15 +54,18 @@ class RunToSheet(unittest.TestCase):
         self.assertEqual(cat, ("Cat", "", 1.0))
         self.assertTrue(all(isinstance(v, (str, float)) for row in values for v in row))
 
-    def test_totals_included_for_copies(self):
+    def test_totals_left_out_of_copies(self):
         r = S.run_to_sheet("SELECT a FROM t ORDER BY row", context.Table(with_world()))
-        self.assertEqual(r.rows[-1][0], "World")
-        self.assertIn("These total rows are included in t: row 11: World",
+        self.assertEqual(r.rows[-1][0], "Tuvalu")
+        self.assertEqual(r.totals, ["row 11: World"])
+        self.assertEqual(r.left_out, [])
+        self.assertIn("Total rows are not in t, so copies leave them out",
                       S.sheet_instructions(context.Table(with_world())))
 
     def test_percent_text_becomes_number(self):
         r = S.run_to_sheet("SELECT a, d FROM t WHERE a = 'Chad'", table(ROWS))
-        self.assertEqual(r.values()[1], ("Chad", 4.68))
+        self.assertEqual(r.values()[1], ("Chad", 0.0468))
+        self.assertEqual(r.kinds, [None, "percent"])
 
     def test_headerless_selection(self):
         r = S.run_to_sheet("SELECT a, b FROM t", table([[1.0, 2.0], [3.0, 4.0]]))

@@ -25,7 +25,7 @@ If LibreOffice's Python has no SQLite, a simpler built-in query form is used ins
 | `fill_formula` | a formula filled down a column or across a row, like dragging the fill handle |
 | `set_values` | plain text or numbers in a range |
 
-**Clean into a new sheet.** Ask for things like "remove duplicate countries", "drop rows with missing values", or "a table of total population per region". CIU writes one SQL `SELECT` (in the same sandbox as Ask), and the result goes to a **new sheet**. The original sheet is never changed. The preview shows how many rows are kept and left out, the SQL, and the first rows. **Create sheet** adds the new sheet next to the original, and one undo removes it again. The original column headers are kept, and text such as `N/A` or `-` is reported in the statistics as a possible missing value, so "drop missing values" can catch it.
+**Clean into a new sheet.** Ask for things like "remove duplicate countries", "make a copy without the rows that have missing values", "fill missing Units with the average", or "a table of total population per region". CIU writes one SQL `SELECT` (in the same sandbox as Ask), and the result goes to a **new sheet**; the original sheet is never changed. The preview shows how many rows are kept, names the rows left out when it can, says total rows are not copied, and shows the SQL and the first rows. **Create sheet** adds the new sheet next to the original, with dates and percentages formatted as in the source, and one undo removes it. The copy holds values, not formulas.
 
 Before anything is written, the plan is checked:
 - Targets must be valid addresses on the current sheet, and operations may not overlap. A plan can have at most 6 operations and 5,000 cells.
@@ -38,6 +38,21 @@ When you click Apply:
 - Calc checks each new formula. If one is invalid (syntax error, unknown function, circular reference, `#REF!`), the whole change is rolled back.
 - Data errors such as `#DIV/0!` are kept and listed.
 - If a target cell was edited after the preview, nothing is written.
+
+## How values are read
+
+CIU reads values the way Calc shows them, so a value means the same thing in a formula, in SQL and in a copy:
+
+| In the sheet | CIU reads | Note |
+|---|---|---|
+| a date (any date format) | `2026-10-02` | dates typed as text are read too when the day and month order is clear |
+| `10%` as text, or 0.1 shown as 10% | 0.1 | as in a Calc formula |
+| `£1,200.50`, `1,450`, `(120.00)` | 1200.5, 1450, -120 | |
+| `00123` | `00123` | a leading zero marks a code, so it stays text |
+| TRUE / FALSE | TRUE / FALSE, or 1 / 0 in SQL | so SUM counts TRUE, as in Calc |
+| `-`, `N/A`, `TBC` in a number column | missing | the answer says which values were treated as missing |
+
+Total and subtotal rows are left out of statistics, queries and copies, and wholly empty rows are skipped. If you click one cell and more data continues below a blank row, the selection line says so.
 
 ## Requirements
 

@@ -7,13 +7,15 @@ fill whatever budget remains.
 import math
 import re
 
+from .values import is_iso_date
+
 
 class Snapshot(object):
     """Cells read from the sheet. rows may cover fewer rows than total_rows."""
 
     def __init__(self, doc_title, sheet, start_col, start_row, rows,
                  formulas=None, total_rows=None, total_cols=None,
-                 scope_note=None, hints=None):
+                 scope_note=None, hints=None, kinds=None):
         self.doc_title = doc_title
         self.sheet = sheet
         self.start_col = start_col
@@ -24,6 +26,9 @@ class Snapshot(object):
         self.total_cols = total_cols if total_cols is not None else (len(rows[0]) if rows else 0)
         self.scope_note = scope_note
         self.hints = hints or []
+        # column index -> how Calc displays it: "date", "datetime", "time",
+        # "percent", "logical" or "currency" (set by the Calc reader).
+        self.kinds = kinds or {}
 
     @property
     def n_read(self):
@@ -82,7 +87,9 @@ def detect_header(rows):
 
 _PERCENT = re.compile(r"^[+\-\u2212]?\d+(?:[.,]\d+)?\s*%$")
 NA_MARKERS = ("n/a", "na", "#n/a", "-", "--", "null", "none", "nan", "?", "missing")
-TOTAL_LABELS = ("total", "totals", "grand total", "sum", "world", "all", "overall")
+TOTAL_LABELS = ("total", "totals", "grand total", "sum", "world", "all", "overall",
+                "subtotal", "sub-total", "sub total")
+_TOTAL_WORDS = re.compile(r"\b(grand total|sub[- ]?totals?|totals?)\b", re.I)
 TOTAL_TOLERANCE = 0.03
 
 
@@ -96,8 +103,12 @@ class ColumnProfile(object):
         self.missing = self.count - len(filled)
         nums = [float(v) for v in filled if is_num(v)]
         texts = [v for v in filled if not is_num(v)]
+        self.dates = sorted((i for i in kept if is_iso_date(values[i])),
+                            key=lambda i: values[i])
         if not filled:
             self.kind = "empty"
+        elif len(self.dates) == len(filled):
+            self.kind = "date"
         elif not texts:
             self.kind = "number"
         elif not nums:
@@ -129,7 +140,9 @@ class ColumnProfile(object):
             self.mean = self.sum / len(nums)
         else:
             self.min = self.max = self.sum = self.mean = None
-        self.where = None  # set by profile(): index -> "row N: label"
+        self.where = None    # set by Table: index -> "row N: label"
+        self.display = None  # set by Table: the column's Calc display kind
+        self.values = values
 
     def describe(self):
         bits = [self.kind]
@@ -139,6 +152,11 @@ class ColumnProfile(object):
             bits.append("%d look like missing-value markers (%s)" % (
                 sum(self.na_markers.values()),
                 ", ".join("%r x%d" % (k, n) for k, n in sorted(self.na_markers.items()))))
+        if self.dates:
+            first, last = self.dates[0], self.dates[-1]
+            where = (lambda i: " (%s)" % self.where(i)) if self.where else (lambda i: "")
+            bits.append("earliest %s%s, latest %s%s" % (
+                self.values[first], where(first), self.values[last], where(last)))
         if self.kind == "number" or self.nums:
             lo = hi = ""
             if self.where and self.ranked:
@@ -152,6 +170,10 @@ class ColumnProfile(object):
                 bits.append("highest: %s; lowest: %s" % (", ".join(top), ", ".join(low)))
         if self.kind != "empty":
             bits.append("%d unique" % self.unique)
+        if self.display == "percent":
+            bits.append("stored as fractions and shown as percentages (0.2 shows as 20%)")
+        elif self.display == "logical":
+            bits.append("TRUE/FALSE values")
         if self.percent_text and self.percent_text * 2 >= len(self.nums) + self.percent_text:
             bits.append("percentages stored as text, like '10%'; in formulas Calc reads "
                         "'10%' as 0.1, so do not divide by 100")
@@ -163,17 +185,25 @@ class ColumnProfile(object):
 
 def _is_total_label(text):
     t = str(text).strip().lower().rstrip(":")
-    return t in TOTAL_LABELS or t.startswith("total ") or t.endswith(" total")
+    return t in TOTAL_LABELS or bool(_TOTAL_WORDS.search(t)) and len(t.split()) <= 4
 
 
 def _total_rows(body, profiles, label_col):
-    """Rows that aggregate the others: labelled as a total, or holding a
-    value equal to the sum of every other value in its column."""
+    """Rows that aggregate the others: labelled as a total or subtotal, or
+    holding a value equal to the sum of every other value in its column.
+
+    A label in the label column is enough. Elsewhere in the row it counts
+    only when it is the row's sole text, so a note such as "total paid by
+    card" in an ordinary row does not mark it."""
     found = set()
-    if label_col is not None:
-        for i, row in enumerate(body):
-            if label_col < len(row) and _is_total_label(row[label_col]):
-                found.add(i)
+    for i, row in enumerate(body):
+        if label_col is not None and label_col < len(row) and \
+                not is_num(row[label_col]) and _is_total_label(row[label_col]):
+            found.add(i)
+            continue
+        texts = [v for v in row if isinstance(v, str) and v.strip()]
+        if len(texts) == 1 and _is_total_label(texts[0]):
+            found.add(i)
     for p in profiles:
         if len(p.ranked) < 3:
             continue
@@ -211,9 +241,26 @@ class Table(object):
         # "which row has the largest value" even when that row is not shown.
         self.label_col = next((p.col_index for p in profiles if p.kind == "text"), None)
         self.totals = _total_rows(self.body, profiles, self.label_col)
-        self.profiles = self._profiles(self.totals) if self.totals else profiles
+        # Wholly empty rows inside a selection (a gap between groups) are not
+        # records: counting them would make "how many" answers too high.
+        self.blanks = {i for i, row in enumerate(self.body) if all(is_empty(v) for v in row)}
+        self.skipped = self.totals | self.blanks
+        self.profiles = self._profiles(self.skipped) if self.skipped else profiles
         for p in self.profiles:
             p.where = self.where
+            p.display = snapshot.kinds.get(p.col_index)
+
+    def column_kind(self, c):
+        """"date", "datetime", "time", "percent", "logical", "currency" or None."""
+        kind = self.snapshot.kinds.get(c)
+        if kind:
+            return kind
+        p = self.profiles[c] if c < len(self.profiles) else None
+        if p is not None and p.kind == "date":
+            return "date"
+        if p is not None and p.percent_text and p.percent_text * 2 >= len(p.nums) + p.percent_text:
+            return "percent"
+        return None
 
     def _profiles(self, exclude):
         return [ColumnProfile(c, self.names[c], self.columns[c], exclude)

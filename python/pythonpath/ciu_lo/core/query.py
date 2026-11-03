@@ -11,6 +11,7 @@ import math
 import re
 
 from .context import Table, col_letter, fmt, is_num
+from .values import to_number
 
 MAX_LIMIT = 20
 DEFAULT_LIMIT = 10
@@ -54,8 +55,8 @@ INSTRUCTIONS = (
     "- filters: column letter, op (= != > >= < <= contains), value. Text "
     "matching ignores case.\n"
     "- value: arithmetic on column letters and numbers with + - * / and "
-    "brackets, e.g. \"C\", \"C - B\", \"(C - B) / B * 100\". Text like "
-    "\"+4.68%\" is read as the number 4.68.\n"
+    "brackets, e.g. \"C\", \"C - B\", \"(C - B) / B * 100\". Percentages are "
+    "fractions: \"+4.68%\" is 0.0468; multiply by 100 to report a percentage.\n"
     "- sort: desc or asc by value; limit: rows to return (max 20).\n"
     "- aggregate instead of rows: count, sum, mean, median, min or max.\n"
     "If the shown cells and statistics already answer the question, reply "
@@ -79,24 +80,6 @@ def instructions(table):
 
 def no_query_reply():
     return json.dumps({"query_needed": False})
-
-
-def to_number(v):
-    """Numbers, and text that plainly holds one: "1,234", "+4.68%", "-0.4"."""
-    if is_num(v):
-        return float(v)
-    if not isinstance(v, str):
-        return None
-    t = v.strip().lstrip("'").replace("−", "-").replace(",", "")
-    if t.endswith("%"):
-        t = t[:-1].strip()
-    if t.startswith("+"):
-        t = t[1:]
-    try:
-        f = float(t)
-    except ValueError:
-        return None
-    return f if math.isfinite(f) else None
 
 
 _TOKEN = re.compile(r"\s*(?:(\d+(?:\.\d+)?)|([A-Za-z]{1,3})|(.))")
@@ -282,7 +265,7 @@ class Query(object):
 
     def run(self):
         t = self.table
-        candidates = [i for i in range(len(t.body)) if i not in t.totals]
+        candidates = [i for i in range(len(t.body)) if i not in t.skipped]
         matched = [i for i in candidates if self._match(t.body[i])]
         snap = t.snapshot
         lines = ["Query: %s" % self.describe(),

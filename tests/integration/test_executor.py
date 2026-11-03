@@ -191,6 +191,37 @@ class Executor(unittest.TestCase):
         self.um.undo()
         self.assertEqual(self.doc.getSheets().getElementNames(), ("Sales", "Cleaned"))
 
+    def test_new_sheet_keeps_dates_and_percentages(self):
+        from ciu_lo.core import sql as S
+        from ciu_lo.core.context import Table
+        self.sheet.getCellRangeByName("H1:J1").setDataArray((("Due", "Rate", "Remote"),))
+        nf = self.doc.getNumberFormats()
+        import uno
+        loc = uno.createUnoStruct("com.sun.star.lang.Locale")
+        date_key = nf.queryKey("DD/MM/YYYY", loc, False)
+        if date_key == -1:
+            date_key = nf.addNew("DD/MM/YYYY", loc)
+        for r, (serial, rate, remote) in enumerate([(46297.0, 0.2, True), (46340.0, 0.05, False),
+                                                     (46360.0, 0.0, True)], start=2):
+            self.cell("H%d" % r).setValue(serial)
+            self.cell("H%d" % r).NumberFormat = date_key
+            self.cell("I%d" % r).setValue(rate)
+            self.cell("I%d" % r).NumberFormat = 10
+            self.cell("J%d" % r).setFormula("=TRUE()" if remote else "=FALSE()")
+        self.doc.getCurrentController().select(self.cell("H1:J4"))
+        snap = reader.read_full(self.doc, reader.read_selection(self.doc))
+        self.assertEqual(snap.rows[1], ["2026-10-02", 0.2, "TRUE"])
+        result = S.run_to_sheet("SELECT h, i, j FROM t WHERE h < '2026-12-01' ORDER BY row",
+                                Table(snap))
+        self.assertEqual(result.readable(), [["2026-10-02", "20%", "TRUE"],
+                                             ["2026-11-14", "5%", "FALSE"]])
+        res = executor.apply_sheet(self.doc, "Copy", result, "Sales")
+        self.assertTrue(res.ok, res.message)
+        new = self.doc.getSheets().getByName("Copy")
+        self.assertEqual([new.getCellRangeByName(r).getString() for r in ("A2", "B2", "C2", "C3")],
+                         ["2026-10-02", "20.00%", "TRUE", "FALSE"])
+        self.assertEqual(new.getCellRangeByName("A2").getValue(), 46297.0)
+
     def test_failed_apply_never_undoes_user_edit(self):
         """An undo context with no changes does not reach the stack, so a
         blind undo() after an early failure would revert the user's edit."""

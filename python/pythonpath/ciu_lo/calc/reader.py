@@ -1,6 +1,7 @@
 """Reads the current Calc selection into a Snapshot. Main thread only."""
 
 from ..core.context import Snapshot
+from ..core.values import apply_kinds
 
 MAX_CELLS = 6000
 MAX_ROWS = 2000
@@ -57,6 +58,9 @@ def read_selection(model, controller=None):
         if not (region.StartColumn == region.EndColumn and region.StartRow == region.EndRow):
             scope_note = "data block around %s" % _ref(addr.StartColumn, addr.StartRow)
             addr = region
+            below = _data_below_gap(sheet, addr)
+            if below:
+                scope_note += "; more data continues below a blank row from row %d" % below
     else:
         addr = _trim_to_used_area(sheet, addr)
 
@@ -69,6 +73,8 @@ def read_selection(model, controller=None):
         addr.EndColumn, addr.StartRow + read_rows - 1)
     rows = [list(r) for r in block.getDataArray()]
     formulas = [list(r) for r in block.getFormulaArray()]
+    rows, kinds = apply_kinds(rows, display_kinds(model, sheet, addr.StartColumn,
+                                                  addr.StartRow, rows))
 
     return Snapshot(
         doc_title=doc_title(controller),
@@ -81,6 +87,7 @@ def read_selection(model, controller=None):
         total_cols=total_cols,
         scope_note=scope_note,
         hints=_free_space_hints(sheet, addr),
+        kinds=kinds,
     )
 
 
@@ -96,19 +103,90 @@ def read_full(model, snapshot, max_cells=FULL_MAX_CELLS):
     sheets = model.getSheets()
     if not sheets.hasByName(snapshot.sheet):
         raise SelectionError("Sheet '%s' no longer exists." % snapshot.sheet)
-    block = sheets.getByName(snapshot.sheet).getCellRangeByPosition(
+    sheet = sheets.getByName(snapshot.sheet)
+    block = sheet.getCellRangeByPosition(
         snapshot.start_col, snapshot.start_row,
         snapshot.start_col + snapshot.total_cols - 1,
         snapshot.start_row + snapshot.total_rows - 1)
+    rows = [list(r) for r in block.getDataArray()]
+    rows, kinds = apply_kinds(rows, display_kinds(model, sheet, snapshot.start_col,
+                                                  snapshot.start_row, rows))
     return Snapshot(
         doc_title=snapshot.doc_title,
         sheet=snapshot.sheet,
         start_col=snapshot.start_col,
         start_row=snapshot.start_row,
-        rows=[list(r) for r in block.getDataArray()],
+        rows=rows,
         total_rows=snapshot.total_rows,
         total_cols=snapshot.total_cols,
+        kinds=kinds,
     )
+
+
+# com.sun.star.util.NumberFormat type bits
+_DATE, _TIME, _CURRENCY, _PERCENT, _LOGICAL = 2, 4, 8, 128, 1024
+SAMPLE = 5
+
+
+def display_kinds(model, sheet, start_col, start_row, rows):
+    """How Calc displays each column's numbers, from the number format of up
+    to SAMPLE numeric cells per column: {column: "date" | "datetime" | "time"
+    | "percent" | "logical" | "currency"}. Columns of plain numbers are left
+    out. Reads a handful of cells per column, never every cell."""
+    try:
+        formats = model.getNumberFormats()
+    except Exception:
+        return {}
+    width = max((len(r) for r in rows), default=0)
+    kinds = {}
+    for c in range(width):
+        votes = {}
+        sampled = 0
+        for r, row in enumerate(rows):
+            if sampled >= SAMPLE:
+                break
+            v = row[c] if c < len(row) else ""
+            if not isinstance(v, float):
+                continue
+            sampled += 1
+            try:
+                key = sheet.getCellByPosition(start_col + c, start_row + r).NumberFormat
+                bits = formats.getByKey(key).Type
+            except Exception:
+                continue
+            if bits & _DATE and bits & _TIME:
+                kind = "datetime"
+            elif bits & _DATE:
+                kind = "date"
+            elif bits & _TIME:
+                kind = "time"
+            elif bits & _LOGICAL:
+                kind = "logical"
+            elif bits & _PERCENT:
+                kind = "percent"
+            elif bits & _CURRENCY:
+                kind = "currency"
+            else:
+                kind = None
+            votes[kind] = votes.get(kind, 0) + 1
+        if votes:
+            best = max(votes, key=votes.get)
+            if best and votes[best] * 2 > sum(votes.values()):
+                kinds[c] = best
+    return kinds
+
+
+def _data_below_gap(sheet, addr, look=3):
+    """Sheet row number where data resumes within `look` rows below the
+    range, after a gap of empty rows; None if it does not."""
+    for gap in range(1, look + 1):
+        r = addr.EndRow + 1 + gap
+        if r >= 1048576:
+            return None
+        row = sheet.getCellRangeByPosition(addr.StartColumn, r, addr.EndColumn, r)
+        if any(v != "" for line in row.getDataArray() for v in line):
+            return r + 1
+    return None
 
 
 def _free_space_hints(sheet, addr):

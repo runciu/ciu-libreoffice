@@ -42,10 +42,14 @@ def run(spec, snap=None):
 
 class Numbers(unittest.TestCase):
     def test_to_number(self):
-        for text, want in [("+4.68%", 4.68), ("'+4.68%", 4.68), ("−0.44%", -0.44),
-                           ("1,234", 1234.0), (" 7 ", 7.0), (3.0, 3.0)]:
+        cases = [("+4.68%", 0.0468), ("'+4.68%", 0.0468), ("\u22120.44%", -0.0044),
+                 ("1,234", 1234.0), (" 7 ", 7.0), (3.0, 3.0), ("\u00a31,200.50", 1200.5),
+                 ("(120.00)", -120.0), ("-\u00a35", -5.0), ("\u00a3-5", -5.0), ("$ 3.5", 3.5),
+                 ("0", 0.0), ("0.25", 0.25), ("\u20ac1,000", 1000.0), ("1e3", 1000.0)]
+        for text, want in cases:
             self.assertAlmostEqual(Q.to_number(text), want, msg=repr(text))
-        for text in ("Africa", "", None, "1.2.3", "nan", "inf"):
+        for text in ("Africa", "", None, "1.2.3", "nan", "inf", "00123", "007", "1,5",
+                     "\u00a3", "()", "%", "+", "12,34,5", "TBC", "1 000"):
             self.assertIsNone(Q.to_number(text), repr(text))
 
 
@@ -86,7 +90,7 @@ class Running(unittest.TestCase):
         self.assertIn("1. row 5: Chad", out)
         out = run({"value": "D", "sort": "asc", "limit": 1})
         self.assertIn("1. row 4: Bulgaria", out)
-        self.assertIn("value -0.44", out)
+        self.assertIn("value -0.0044", out)
 
     def test_numeric_filter_on_text_percentages(self):
         out = run({"filters": [{"column": "D", "op": "<", "value": 0}], "aggregate": "count"})

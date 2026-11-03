@@ -71,18 +71,23 @@ CHECKS = [
     ("Ask", "Which customer bought the most units in total?",
      "SELECT b, SUM(e) AS units FROM t GROUP BY LOWER(TRIM(b)) ORDER BY units DESC LIMIT 1", None),
     ("Propose change", "Add a column with revenue after discount", None,
-     "Expect a formula like =H2*(1-G2) filled down column I, with a Revenue after discount "
-     "header. Calc converts the text '10%' in plain arithmetic, so most rows work; order 1018 "
-     "has no revenue, so its cell may show an error, which the result lists. (SUM over column G "
-     "would give 0, because range functions skip text.)"),
+     "Expect a formula like =H2*(1-G2) filled down column I. The preview shows calculated results: "
+     "I3 should be 31.5 (35 less 10%). If it shows 34.965 the formula divided the percentage by 100 "
+     "again: press Discard. Order 1018 has no revenue, so its cell shows an error, which is listed."),
     ("Propose change", "Remove duplicate orders (same Order ID) into a new sheet",
      "SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY a ORDER BY row) AS n FROM t) WHERE n = 1",
-     "Rows kept (the Total row is kept unless you also ask to drop it)."),
-    ("Propose change", "Drop rows with missing values into a new sheet",
-     "SELECT * FROM t WHERE e IS NOT NULL AND f IS NOT NULL AND c <> 'N/A' AND a IS NOT NULL",
-     "Rows kept (removes 1004, 1010, 1018 and the Total row, whose Order ID is empty)."),
+     "The preview should list the second 1007 and the second 1015 as left out, and say the Total "
+     "row is not copied."),
+    ("Propose change", "Make a copy without the rows that have missing values, treating N/A as missing",
+     "SELECT * FROM t WHERE e IS NOT NULL AND f IS NOT NULL AND c <> 'N/A'",
+     "Leaves out 1004 (no Units), 1010 (Region N/A) and 1018 (price '-'). Without 'treating N/A as "
+     "missing' CIU may keep 1010, since N/A is text, not an empty cell."),
+    ("Propose change", "Make a copy with missing Units filled with the average Units",
+     "SELECT ROUND(AVG(e), 2) FROM t",
+     "is the average, so order 1004 gets that many Units in the copy. Duplicates count towards the "
+     "average; the Total row does not. No worked example in CIU's instructions covers this."),
     ("Propose change", "Make a new sheet with total revenue per region",
-     "SELECT c, SUM(h) AS revenue FROM t WHERE a IS NOT NULL GROUP BY c ORDER BY revenue DESC",
+     "SELECT c, SUM(h) AS revenue FROM t GROUP BY c ORDER BY revenue DESC",
      "One row per region, including N/A."),
 ]
 
@@ -123,10 +128,11 @@ def answers(doc):
     for kind, prompt, sql, note in CHECKS:
         expected = note or ""
         if sql:
-            cols, rows = S.execute(sql, table, 100, 5.0, include_totals=prompt.startswith(
-                ("Remove", "Drop", "Make")))
-            if prompt.startswith(("Remove", "Drop")):
+            cols, rows, _ = S.execute(sql, table, 100, 5.0)
+            if prompt.startswith(("Remove", "Make a copy without")):
                 expected = "%d rows kept. %s" % (len(rows), note or "")
+            elif "filled with the average" in prompt:
+                expected = "%s %s" % (S.format_cell(rows[0][0]), note)
             elif len(rows) == 1 and len(cols) <= 2:
                 expected = " = ".join(S.format_cell(v) for v in rows[0]) + (
                     ". " + note if note else "")

@@ -412,13 +412,22 @@ class AssistantDialog(object):
                  "New sheet '%s': %d row%s x %d column%s, from %d source rows (%s)."
                  % (op.sheet, kept, "" if kept == 1 else "s", len(result.headers),
                     "" if len(result.headers) == 1 else "s", source,
-                    "%d left out" % (source - kept) if kept <= source else "%d added" % (kept - source)),
-                 "SQL: %s" % op.sql, "", "First rows:", " | ".join(_clip(h, 24) for h in result.headers)]
-        for row in result.values()[1:6]:
-            lines.append(" | ".join(_clip(sqlmod.format_cell(v) if v != "" else "-", 24) for v in row))
+                    "%d left out" % (source - kept) if kept <= source else "%d added" % (kept - source))]
+        if result.left_out:
+            shown = ", ".join(result.left_out[:8])
+            more = " and %d more" % (len(result.left_out) - 8) if len(result.left_out) > 8 else ""
+            lines.append("Leaves out: %s%s." % (shown, more))
+        if result.totals:
+            lines.append("Total rows are not copied (they would be out of date): %s."
+                         % ", ".join(result.totals[:4]))
+        lines += result.notes
+        lines += ["SQL: %s" % op.sql, "", "First rows:", " | ".join(_clip(h, 24) for h in result.headers)]
+        for row in result.readable(5):
+            lines.append(" | ".join(_clip(v, 24) for v in row))
         if kept > 5:
             lines.append("...")
-        lines += ["", "This sheet is not changed. Click Apply to create the new sheet, or Discard."]
+        lines += ["", "The copy holds values, not formulas. This sheet is not changed.",
+                  "Click Apply to create the new sheet, or Discard."]
         self._show_answer("\n".join(lines))
         self.pending = (plan, result)
         self.dm.getByName("btnApply").Label = "Create sheet"
