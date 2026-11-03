@@ -278,7 +278,7 @@ class AssistantDialog(object):
                 self.ui.post(lambda: self._show_answer(status.describe()))
                 return
             table = Table(snap)
-            cands = cleanmod.candidates(table)
+            cands, consistent = cleanmod.candidates(table, ask_all=bool(guidance))
             decisions, skipped = [], []
             for i, cand in enumerate(cands):
                 if self.stop_event.is_set():
@@ -302,7 +302,7 @@ class AssistantDialog(object):
                 self.ui.post(lambda: self._show_answer("Stopped. Nothing was changed."))
                 return
             try:
-                cleaning = cleanmod.Cleaning(table, decisions, skipped)
+                cleaning = cleanmod.Cleaning(table, decisions, skipped, consistent)
             except QueryError as e:
                 msg = str(e)
                 self.ui.post(lambda: self._show_answer("Could not clean this selection: " + msg))
@@ -345,7 +345,7 @@ class AssistantDialog(object):
         """One line pointing to Clean data when it has something to fix."""
         try:
             table = Table(snap)
-            if any(k.numeric for k in cleanmod.candidates(table)) or \
+            if any(k.numeric for k in cleanmod.candidates(table)[0]) or \
                     cleanmod.Cleaning(table).changes:
                 return ("\n\nTip: Clean data can make a cleaned copy (consistent values, "
                         "numbers and dates stored as text fixed) for you to check first.")

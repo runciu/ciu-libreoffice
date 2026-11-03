@@ -12,13 +12,15 @@ case, numbers and dates stored as text) are made by code alone.
 import re
 
 from . import sql as S
-from .context import estimate_tokens, fmt, is_empty
+from .context import NA_MARKERS, estimate_tokens, fmt, is_empty
 from .values import DATE_KINDS, to_number
 
 _CODE = re.compile(r"^(?=.*\d)[A-Za-z0-9._/#-]+$")
 
 SHEET = "Cleaned"
-MAX_VALUES = 30         # a column with more distinct values is free text or IDs
+MAX_VALUES = 30         # values listed in full; longer columns send look-alikes only
+MAX_DISTINCT = 5000     # beyond this a column is not checked
+_MARKERS = set(NA_MARKERS) | {"tbc", "tba", "unknown", "n.a.", "not known", "?"}
 MAX_VALUE_LENGTH = 40
 MAX_NEW_LENGTH = 60
 MAX_EXAMPLES = 4        # rows shown for rare values
@@ -86,6 +88,7 @@ class Candidate(object):
         self.values = values      # [(text, count)], most common first
         self.empty = empty
         self.examples = []        # (value, row text) for rare values
+        self.hidden = 0           # distinct values not listed (long columns)
 
     def count(self, value):
         key = value.lower()
@@ -97,10 +100,15 @@ def _label(table, c):
     return full.split(" (", 1)[1][:-1] if " (" in full else ""
 
 
-def candidates(table):
+def candidates(table, ask_all=False):
+    """(columns to ask the model about, names of columns that look
+    consistent and are not sent). A column is sent when it has something to
+    interpret: a value that occurs once (where typos and odd words hide), two
+    values that look alike, or a missing-value marker. ask_all sends every
+    column that can be checked, for when the user typed an instruction."""
     names = S.column_names(table)
     numeric = S.numeric_columns(table)
-    out = []
+    out, consistent = [], []
     for c in range(min(table.width, len(table.profiles))):
         if table.column_kind(c) in DATE_KINDS + ("logical",):
             continue
@@ -118,18 +126,87 @@ def candidates(table):
             continue
         p = table.profiles[c]
         filled = p.count - p.missing
-        if not p.kind.startswith(("text", "mixed")) or p.unique > MAX_VALUES or \
-                p.unique >= filled or \
-                any(len(fmt(shown)) > MAX_VALUE_LENGTH for _, shown, _ in p.groups):
-            continue  # free text, identifiers, or nothing repeated
+        if not p.kind.startswith(("text", "mixed")) or p.unique >= filled or \
+                p.unique > MAX_DISTINCT:
+            continue  # free text, identifiers or numbers
         values = [(fmt(shown).strip(), n) for n, shown, _ in p.groups if isinstance(shown, str)]
-        if values and all(_CODE.match(v) for v, _ in values):
+        lengths = sorted(len(v) for v, _ in values)
+        if not values or lengths[len(lengths) // 2] > MAX_VALUE_LENGTH:
+            continue  # sentences: free text
+        if all(_CODE.match(v) for v, _ in values):
             continue  # codes such as 00123 or INV-7: nothing to interpret
-        if values:
-            out.append(Candidate(c, names[c], _label(table, c), False, values, p.missing))
+        groups = lookalikes(values)
+        markers = [(v, n) for v, n in values if v.lower() in _MARKERS]
+        if len(values) <= MAX_VALUES:
+            if ask_all or groups or markers or any(n == 1 for _, n in values):
+                out.append(Candidate(c, names[c], _label(table, c), False, values, p.missing))
+            else:
+                consistent.append(names[c])
+            continue
+        shown = []
+        for v in [v for g in groups for v in g] + markers:
+            if v not in shown and len(shown) < MAX_VALUES:
+                shown.append(v)
+        if not shown:
+            consistent.append(names[c])
+            continue
+        cand = Candidate(c, names[c], _label(table, c), False, shown, p.missing)
+        cand.hidden = len(values) - len(shown)
+        out.append(cand)
     for cand in out:
         cand.examples = _examples(table, cand)
-    return out
+    return out, consistent
+
+
+def _norm(v):
+    return re.sub(r"[^0-9a-z]", "", v.lower())
+
+
+def _alike(a, b):
+    return is_spelling(a, b) or is_spelling(b, a)
+
+
+def lookalikes(values):
+    """Groups of values that read as spellings of each other ('London',
+    'Lodnon', 'london.'), most common first in each group. A long column is
+    compared only within buckets of values that share their first or last
+    two letters and are of similar length, so it stays fast."""
+    texts = [v for v in values if _norm(v[0])]
+    parent = list(range(len(texts)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def compare(idx):
+        for x in range(len(idx)):
+            for y in range(x + 1, len(idx)):
+                a, b = texts[idx[x]][0], texts[idx[y]][0]
+                na, nb = texts[idx[x]][1], texts[idx[y]][1]
+                # A typo is rarer than the value it misspells: 'Fig' x2 and
+                # 'Fir' x2 are two values, 'Lodnon' x1 beside 'London' x9 is not.
+                if 2 * min(na, nb) > max(na, nb):
+                    continue
+                if abs(len(_norm(a)) - len(_norm(b))) <= 2 or min(len(_norm(a)), len(_norm(b))) <= 3:
+                    if _alike(a, b):
+                        parent[find(idx[x])] = find(idx[y])
+
+    if len(texts) <= MAX_VALUES:
+        compare(list(range(len(texts))))
+    else:
+        for key in (lambda k: k[:2], lambda k: k[-2:]):
+            buckets = {}
+            for i, (v, _) in enumerate(texts):
+                buckets.setdefault(key(_norm(v)), []).append(i)
+            for idx in buckets.values():
+                if len(idx) <= 400:
+                    compare(idx)
+    groups = {}
+    for i in range(len(texts)):
+        groups.setdefault(find(i), []).append(texts[i])
+    return [sorted(g, key=lambda x: -x[1]) for g in groups.values() if len(g) > 1]
 
 
 def _examples(table, cand):
@@ -168,7 +245,11 @@ def messages(cand, guidance=""):
     listed = ", ".join("'%s' x%d" % (v, n) for v, n in cand.values)
     if cand.empty:
         listed += ", empty x%d" % cand.empty
-    lines.append(("Text values: " if cand.numeric else "Values: ") + listed)
+    if cand.hidden:
+        lines.append("Values that look alike or like missing markers (the column has %d "
+                     "other values that look distinct): %s" % (cand.hidden, listed))
+    else:
+        lines.append(("Text values: " if cand.numeric else "Values: ") + listed)
     if cand.examples:
         lines.append("Rows with rare values:")
         lines += ["- '%s' in %s" % ex for ex in cand.examples]
@@ -199,7 +280,7 @@ class Decision(object):
 
     def unresolved(self):
         """Values still outside the standard ones after the rules."""
-        if self.kind not in _STANDARDISED or not self.standard:
+        if self.kind not in _STANDARDISED or not self.standard or self.cand.hidden:
             return []
         known = {s.lower() for s in self.standard}
         return [(v, n) for v, n in self.cand.values
@@ -279,23 +360,34 @@ def _distance(a, b):
 def is_spelling(old, new):
     """True when old reads as a typo or abbreviation of new: 'yse' and 'Y'
     for 'Yes', 'Lodnon' for 'London', 'compl.' for 'Complete'. Anything else
-    is a change of meaning, which the preview asks the user to check."""
+    is a change of meaning, which the preview asks the user to check.
+    Values whose numbers differ are never spellings of each other."""
     if not isinstance(new, str):
         return False
-    o = re.sub(r"[^0-9a-z]", "", old.lower())
-    n = re.sub(r"[^0-9a-z]", "", new.lower())
+    ow, nw = old.lower().split(), new.lower().split()
+    shared = set(ow) & set(nw)
+    if shared and [w for w in ow if w not in shared] and [w for w in nw if w not in shared]:
+        # Judge only the words that differ: 'Town Hazel' and 'Town Mapel'
+        # share 'town', and 'hazel' is no typo of 'mapel'.
+        ow = [w for w in ow if w not in shared]
+        nw = [w for w in nw if w not in shared]
+    o = re.sub(r"[^0-9a-z]", "", "".join(ow))
+    n = re.sub(r"[^0-9a-z]", "", "".join(nw))
     if not o or not n:
         return False
+    if re.findall(r"\d+", o) != re.findall(r"\d+", n):
+        return False  # 'Unit 4' and 'Unit 5' are different values, not a typo
     if n.startswith(o) and (len(o) <= 3 or old.rstrip().endswith(".")):
         return True
-    return _distance(o, n) <= (1 if len(n) <= 4 else 2)
+    return _distance(o, n) <= (1 if len(n) <= 6 else 2)
 
 
 class Cleaning(object):
     """A proposed clean: the copy, and what was changed to make it."""
 
-    def __init__(self, table, decisions=(), skipped=()):
+    def __init__(self, table, decisions=(), skipped=(), consistent=()):
         self.table = table
+        self.consistent = list(consistent)
         self.decisions = list(decisions)
         rules = {}
         for d in self.decisions:
@@ -342,6 +434,8 @@ class Cleaning(object):
                 for d in self.decisions]
         if read:
             lines += ["", "How CIU read the columns: " + "; ".join(read) + "."]
+        if self.consistent:
+            lines += ["Looked consistent, not sent to CIU: %s." % ", ".join(self.consistent)]
         if self.check:
             lines += ["", "Check these (CIU's reading of what values mean):"]
             lines += ["  " + x for x in self.check]

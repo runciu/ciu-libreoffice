@@ -30,12 +30,12 @@ def table(rows=ROWS):
 
 def decide(t, replies=REPLIES):
     return [C.parse(json.dumps(replies.get(k.name, {"kind": "other", "rules": []})), k)
-            for k in C.candidates(t)]
+            for k in C.candidates(t)[0]]
 
 
 class Candidates(unittest.TestCase):
     def test_columns_offered(self):
-        cands = {k.name: k for k in C.candidates(table())}
+        cands = {k.name: k for k in C.candidates(table())[0]}
         self.assertEqual(sorted(cands), ["amount", "client", "paid"])
         self.assertEqual(cands["paid"].empty, 1)
         self.assertTrue(cands["amount"].numeric)
@@ -45,14 +45,56 @@ class Candidates(unittest.TestCase):
         rows = [["ID", "Due", "Comment"]] + [
             ["X%d" % i, "2026-10-%02d" % (i + 1), "note number %d" % i] for i in range(6)]
         snap = context.Snapshot("d", "S", 0, 0, rows, kinds={1: "date"})
-        self.assertEqual(C.candidates(context.Table(snap)), [])
+        self.assertEqual(C.candidates(context.Table(snap))[0], [])
         rows = [["Account", "Grade"], ["00123", "A1"], ["00123", "B2"], ["00456", "A1"]]
-        self.assertEqual(C.candidates(table(rows)), [])
+        self.assertEqual(C.candidates(table(rows))[0], [])
+
+
+class Choosing(unittest.TestCase):
+    def test_consistent_columns_not_sent(self):
+        rows = [["Client", "Country", "Paid"], ["Acme", "UK", "Yes"], ["Bright", "France", "No"],
+                ["Acme", "UK", "settled"], ["Bright", "France", "No"]]
+        cands, consistent = C.candidates(table(rows))
+        self.assertEqual([k.name for k in cands], ["paid"])
+        self.assertEqual(consistent, ["client", "country"])
+        cands, consistent = C.candidates(table(rows), ask_all=True)
+        self.assertEqual([k.name for k in cands], ["client", "country", "paid"])
+        text = C.Cleaning(table(rows), consistent=["client", "country"]).describe()
+        self.assertIn("Looked consistent, not sent to CIU: client, country.", text)
+
+    def test_look_alikes_and_markers_are_sent(self):
+        rows = [["City"], ["London"], ["Lodnon"], ["London"], ["Paris"], ["Paris"], ["Leeds"],
+                ["Leeds"]]
+        self.assertEqual([k.name for k in C.candidates(table(rows))[0]], ["city"])
+        rows = [["Region"], ["North"], ["N/A"], ["North"], ["South"], ["N/A"], ["South"]]
+        self.assertEqual([k.name for k in C.candidates(table(rows))[0]], ["region"])
+
+    def test_long_column_sends_only_look_alikes(self):
+        names = ["Town %s" % w for w in ("Alder", "Birch", "Cedar", "Dogwood", "Elm", "Fir",
+                 "Ginkgo", "Hazel", "Ivy", "Juniper", "Kapok", "Larch", "Maple", "Nutmeg", "Oak",
+                 "Pine", "Quince", "Rowan", "Spruce", "Teak", "Upas", "Vine", "Willow", "Yew",
+                 "Zelkova", "Acacia", "Banyan", "Cypress", "Date", "Ebony", "Fig", "Gum")]
+        rows = [["Town"]] + [[n] for n in names for _ in range(2)] + [["Town Mapel"]]
+        cands, _ = C.candidates(table(rows))
+        self.assertEqual(len(cands), 1)
+        self.assertEqual(sorted(v for v, _ in cands[0].values), ["Town Mapel", "Town Maple"])
+        self.assertEqual(cands[0].hidden, 31)
+        user = C.messages(cands[0])[1]["content"]
+        self.assertIn("Values that look alike or like missing markers (the column has 31 other "
+                      "values that look distinct): 'Town Maple' x2, 'Town Mapel' x1", user)
+        d = C.parse(json.dumps({"kind": "category", "standard": ["Town Maple"],
+                                "rules": [{"from": "Town Mapel", "to": "Town Maple"}]}), cands[0])
+        self.assertEqual(d.unresolved(), [])
+
+    def test_look_alikes(self):
+        groups = C.lookalikes([("London", 9), ("Lodnon", 1), ("Paris", 5), ("paris.", 1),
+                               ("Leeds", 3), ("Lima", 2), ("Unit 4", 2), ("Unit 5", 2)])
+        self.assertEqual(groups, [[("London", 9), ("Lodnon", 1)], [("Paris", 5), ("paris.", 1)]])
 
 
 class Messages(unittest.TestCase):
     def test_one_column_per_request_with_rows_for_rare_values(self):
-        cands = {k.name: k for k in C.candidates(table())}
+        cands = {k.name: k for k in C.candidates(table())[0]}
         msgs = C.messages(cands["amount"], "TBC is unknown")
         self.assertEqual(msgs[0]["content"], C.NUMBER_SYSTEM)
         user = msgs[1]["content"]
@@ -69,7 +111,7 @@ class Messages(unittest.TestCase):
 
 class Parsing(unittest.TestCase):
     def cand(self, name):
-        return {k.name: k for k in C.candidates(table())}[name]
+        return {k.name: k for k in C.candidates(table())[0]}[name]
 
     def test_rules_checked_against_the_column(self):
         reply = {"kind": "yes/no", "standard": ["Yes", "No", "yes"], "blank_means": "Unpaid",
@@ -112,7 +154,7 @@ class Spelling(unittest.TestCase):
 
     def test_changes_of_meaning(self):
         for old, new in [("settled", "Yes"), ("TBC", None), ("nil", 0.0), ("Brite", "Bright"),
-                         ("Paris", "London"), ("no", "Yes")]:
+                         ("Paris", "London"), ("no", "Yes"), ("Unit 4", "Unit 5")]:
             self.assertFalse(C.is_spelling(old, new), (old, new))
 
 
@@ -140,7 +182,7 @@ class Cleaning(unittest.TestCase):
 
     def test_rejected_and_skipped_reported(self):
         t = table()
-        cands = C.candidates(t)
+        cands = C.candidates(t)[0]
         d = C.parse(json.dumps({"kind": "yes/no", "standard": ["Yes", "No"],
                                 "rules": [{"from": "perhaps", "to": "No"}]}), cands[1])
         text = C.Cleaning(t, [d], skipped=[cands[2]]).describe()
