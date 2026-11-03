@@ -132,7 +132,8 @@ def apply_sheet(doc, wanted_name, result, source_sheet):
         # Bulk write: fast, and undo stays correct because undoing the sheet
         # insertion removes the whole sheet, contents included.
         new.getCellRangeByPosition(0, 0, width - 1, len(values) - 1).setDataArray(values)
-        _format_columns(doc, new, result.kinds, len(values))
+        _format_columns(doc, new, result.kinds, len(values),
+                        _source_formats(sheets, source_sheet, result))
         new.getCellRangeByPosition(0, 0, width - 1, 0).CharWeight = 150.0
     except Exception as e:
         um.leaveUndoContext()
@@ -153,15 +154,35 @@ FORMAT_CODES = {"date": "YYYY-MM-DD", "datetime": "YYYY-MM-DD HH:MM", "time": "H
                 "percent": "0.00%", "logical": "BOOLEAN", "currency": "#,##0.00"}
 
 
-def _format_columns(doc, sheet, kinds, height):
-    """Give date, percentage and TRUE/FALSE columns of a new sheet the
-    matching number format, so they read as they did in the source."""
+def _source_formats(sheets, source_sheet, result):
+    """Number format keys of the source cells the result names, per column."""
+    keys = [None] * len(result.kinds)
+    try:
+        src = sheets.getByName(source_sheet)
+    except Exception:
+        return keys
+    for i, cell in enumerate(getattr(result, "formats", [])):
+        if cell is not None and result.kinds[i] in FORMAT_CODES:
+            try:
+                keys[i] = src.getCellByPosition(cell[0], cell[1]).NumberFormat
+            except Exception:
+                pass
+    return keys
+
+
+def _format_columns(doc, sheet, kinds, height, source_keys=None):
+    """Give date, percentage and TRUE/FALSE columns of a new sheet a number
+    format, so they read as they did in the source: the source column's own
+    format when known, else a standard one."""
     import uno
     formats = doc.getNumberFormats()
     locale = uno.createUnoStruct("com.sun.star.lang.Locale")
     for c, kind in enumerate(kinds):
         code = FORMAT_CODES.get(kind)
         if not code or height < 2:
+            continue
+        if source_keys and c < len(source_keys) and source_keys[c] is not None:
+            sheet.getCellRangeByPosition(c, 1, c, height - 1).NumberFormat = source_keys[c]
             continue
         key = formats.queryKey(code, locale, False)
         if key == -1:

@@ -349,6 +349,12 @@ class Table(object):
         lc = self.label_col
         if lc is not None and lc < len(row) and not is_empty(row[lc]):
             return _cell_text(row[lc], 30)
+        if i in getattr(self, "totals", ()):
+            # A total row often has its label in another column ("Grand total"
+            # beside the amount); name it by its text so it can be recognised.
+            words = [v for v in row if isinstance(v, str) and not is_empty(v)]
+            if words:
+                return _cell_text(words[0], 30)
         return ""
 
     def where(self, i, label_only=False):

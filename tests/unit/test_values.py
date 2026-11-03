@@ -130,7 +130,7 @@ class Totals(unittest.TestCase):
         self.assertEqual(sorted(t.totals), [2, 5])
         out = context.render(t.snapshot)
         self.assertIn("max 72000 (row 5: 003)", out)
-        self.assertIn("Total rows (left out of the statistics): row 4, row 7", out)
+        self.assertIn("Total rows (left out of the statistics): row 4: Sales subtotal, row 7: Engineering subtotal", out)
 
     def test_word_total_in_an_ordinary_row_is_not_a_total(self):
         rows = [["Item", "Note", "Cost"], ["Tea", "total paid by card", 2.0],

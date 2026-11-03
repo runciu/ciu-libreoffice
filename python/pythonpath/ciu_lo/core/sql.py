@@ -163,9 +163,8 @@ def value_rules(table):
              "IS NOT NULL or COALESCE(x, '').",
              "Do all arithmetic in SQL (SUM, COUNT, AVG, ROUND); never add up results yourself.",
              "Percentages are fractions: '10%' is 0.1; multiply by 100 to report one.",
-             "Amounts like '£1,200.50' or '(120.00)' are numbers (1200.5, -120). Codes "
-             "with leading zeros, like '00123', stay text.",
-             "In number columns, other text (like '-', 'N/A' or 'TBC') is NULL."]
+             "Text amounts ('£1,200.50', '(120.00)') are numbers; other text in number "
+             "columns ('-', 'TBC') is NULL. Codes like '00123' stay text."]
     dated = [c for c in range(table.width) if table.column_kind(c) in ("date", "datetime")]
     if dated:
         name = column_names(table)[dated[0]]
@@ -217,20 +216,19 @@ def _example_names(table):
 
 def instructions(table):
     return (
-        "Some questions need every row, not just the rows shown: filtering, "
-        "ranking, grouping, or totals over a subset. For those, first reply "
-        "with one SQLite SELECT as JSON:\n"
-        '{"sql_needed": true, "values": "status: Done, done., Y = finished; No, empty = '
-        'not finished", "sql": "SELECT ..."}\n'
+        "Questions that pick, find, count, list, rank or add up rows are answered with "
+        "SQL, even when the rows are shown. First reply with one SQLite SELECT as JSON:\n"
+        '{"sql_needed": true, "values": "<column>: <value>, <value> = <meaning>; empty = '
+        '<meaning>", "sql": "SELECT ..."}\n'
         "The selection is the table t, described with the selection.\n"
-        "- values: first say what each listed value of the text columns you test means "
-        "here, empty included, reading abbreviations and typos as a person would. Then "
-        "write SQL that matches it.\n"
+        "- values: for each text column your WHERE tests, what each listed value and an "
+        "empty cell mean for this question, read as a person would. The SQL must match "
+        "it, empty cells included.\n"
         "- %s\n"
         "- Return at most %d rows and include the name column so results are "
         "readable.\n"
-        "If the shown cells and statistics already answer the question, reply "
-        '{"sql_needed": false}.' % ("\n- ".join(value_rules(table)), MAX_ROWS)
+        "Reply {\"sql_needed\": false} only for questions about what the table is or "
+        "how it is laid out, or about formulas." % ("\n- ".join(value_rules(table)), MAX_ROWS)
     )
 
 
@@ -304,7 +302,7 @@ def execute(sql, table, max_rows, time_limit, rules=None):
 
 class SheetResult(object):
     def __init__(self, headers, rows, source_rows, kinds=None, left_out=None,
-                 totals=None, notes=None):
+                 totals=None, notes=None, formats=None):
         self.headers = headers
         self.rows = rows
         self.source_rows = source_rows          # data rows offered to the SQL
@@ -312,6 +310,9 @@ class SheetResult(object):
         self.left_out = left_out                # labels of rows not copied, if known
         self.totals = totals or []              # total rows never offered
         self.notes = notes or []
+        # Per column, the (column, row) of a source cell whose number format
+        # the copy reuses, so dates read '02 Sep 2026' as in the source.
+        self.formats = formats or [None] * len(headers)
 
     def values(self):
         """Header plus rows, as Calc wants them: floats and strings only.
@@ -332,7 +333,7 @@ class SheetResult(object):
         """The first rows as text, the way the new sheet will show them."""
         def cell(v, kind):
             if v is None:
-                return "-"
+                return ""
             if kind == "percent" and isinstance(v, (int, float)):
                 return "%s%%" % format_cell(round(v * 100, 4))
             if kind == "logical" and v in (0, 1):
@@ -356,9 +357,10 @@ def run_to_sheet(sql, table, rules=None):
         raise QueryError("The result has more than %d rows." % MAX_SHEET_ROWS)
     names = column_names(table)
     index = {n: c for c, n in enumerate(names)}
-    headers, kinds = [], []
+    headers, kinds, formats = [], [], []
     for i, col in enumerate(cols):
         c = index.get(col.lower())
+        formats.append(_format_cell(table, c) if c is not None else None)
         if c is not None:
             full = table.names[c]
             headers.append(full.split(" (", 1)[1][:-1] if " (" in full else col.upper())
@@ -369,7 +371,23 @@ def run_to_sheet(sql, table, rules=None):
             kinds.append("date" if filled and all(is_iso_date(v) for v in filled) else None)
     source = len(table.body) - len(table.skipped)
     return SheetResult(headers, rows, source, kinds, _left_out(table, cols, rows, index, rules),
-                       [table.where(i) for i in sorted(table.totals)], notes)
+                       [table.where(i) for i in sorted(table.totals)], notes, formats)
+
+
+def _format_cell(table, c):
+    """A data cell of column c holding a real value (not text typed as a date
+    or number), as absolute (column, row), or None."""
+    snap = table.snapshot
+    offset = 1 if table.header else 0
+    typed = set(snap.typed_dates.get(c, []))
+    for i, row in enumerate(table.body):
+        if i in table.skipped or c >= len(row) or is_empty(row[c]) or i + offset in typed:
+            continue
+        v = row[c]
+        if isinstance(v, str) and not is_iso_date(v) and v not in ("TRUE", "FALSE"):
+            continue
+        return snap.start_col + c, snap.start_row + offset + i
+    return None
 
 
 def _left_out(table, cols, rows, index, rules=None):

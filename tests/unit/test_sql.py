@@ -155,7 +155,9 @@ class ValuesField(unittest.TestCase):
     def test_schema_asks_for_values_before_sql(self):
         props = list(S.SCHEMA["properties"])
         self.assertLess(props.index("values"), props.index("sql"))
-        self.assertIn('"values": "status:', S.instructions(context.Table(snapshot(self.ROWS))))
+        text = S.instructions(context.Table(snapshot(self.ROWS)))
+        self.assertIn('"values": "<column>: <value>, <value> = <meaning>; empty = <meaning>"', text)
+        self.assertIn("even when the rows are shown", text)
 
 
 class EmptyText(unittest.TestCase):

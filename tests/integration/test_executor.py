@@ -219,7 +219,8 @@ class Executor(unittest.TestCase):
         self.assertTrue(res.ok, res.message)
         new = self.doc.getSheets().getByName("Copy")
         self.assertEqual([new.getCellRangeByName(r).getString() for r in ("A2", "B2", "C2", "C3")],
-                         ["2026-10-02", "20.00%", "TRUE", "FALSE"])
+                         [self.cell("H2").getString(), self.cell("I2").getString(), "TRUE", "FALSE"])
+        self.assertEqual(new.getCellRangeByName("A2").getString(), "02/10/2026")
         self.assertEqual(new.getCellRangeByName("A2").getValue(), 46297.0)
 
     def test_failed_apply_never_undoes_user_edit(self):
