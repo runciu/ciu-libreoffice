@@ -29,13 +29,14 @@ TIME_LIMIT = 2.0
 SHEET_TIME_LIMIT = 10.0
 MAX_SHEET_ROWS = 100000
 MAX_SQL_LEN = 2000
-RESERVE = 900  # tokens for one retry plus the result
+RESERVE = 1000  # tokens for one retry plus the result
 
 SCHEMA = {
     "type": "object",
     "properties": {
         "change_request": {"type": "boolean"},
         "sql_needed": {"type": "boolean"},
+        "values": {"type": "string", "maxLength": 300},
         "sql": {"type": "string"},
     },
     "required": ["sql_needed"],
@@ -95,29 +96,19 @@ MAX_LISTED_VALUES = 8
 MAX_LISTED_LENGTH = 24   # longer values are free text, never listed
 
 
-_YES_NO = {"y": "yes", "n": "no"}
-
-
 def stored_spellings(table):
     """{(column, lowered text): text as stored in t}. Text spelled differently
     only by case or spaces is stored in its most common spelling, so
-    paid = 'No' also finds 'no' and ' No '. In a yes/no column that also holds
-    the full words, 'Y' and 'N' are stored as them, so 'Y' cannot be read as
-    anything but yes."""
+    paid = 'No' also finds 'no' and ' No '. What a value means ('Y' for yes)
+    is left to the model, which can read messy data as a person would."""
     numeric = numeric_columns(table)
     out = {}
     for c in range(min(table.width, len(table.profiles))):
         if c in numeric or table.column_kind(c) == "logical":
             continue
-        groups = table.profiles[c].groups
-        shown_by_key = {shown.strip().lower(): shown for _, shown, _ in groups}
-        for _, shown, spellings in groups:
+        for _, shown, spellings in table.profiles[c].groups:
             if len(spellings) > 1:
                 out[(c, shown.strip().lower())] = shown
-        if shown_by_key and set(shown_by_key) <= {"yes", "y", "no", "n"}:
-            for short, full in _YES_NO.items():
-                if short in shown_by_key and full in shown_by_key:
-                    out[(c, short)] = shown_by_key[full]
     return out
 
 
@@ -229,10 +220,13 @@ def instructions(table):
         "Some questions need every row, not just the rows shown: filtering, "
         "ranking, grouping, or totals over a subset. For those, first reply "
         "with one SQLite SELECT as JSON:\n"
-        '{"sql_needed": true, "sql": "SELECT ..."}\n'
+        '{"sql_needed": true, "values": "status: Done, done., Y = finished; No, empty = '
+        'not finished", "sql": "SELECT ..."}\n'
         "The selection is the table t, described with the selection.\n"
+        "- values: first say what each listed value of the text columns you test means "
+        "here, empty included, reading abbreviations and typos as a person would. Then "
+        "write SQL that matches it.\n"
         "- %s\n"
-        "- Text comparisons: use LOWER(x) = 'value' to ignore case.\n"
         "- Return at most %d rows and include the name column so results are "
         "readable.\n"
         "If the shown cells and statistics already answer the question, reply "
@@ -241,16 +235,19 @@ def instructions(table):
 
 
 class SqlQuery(object):
-    def __init__(self, sql, table):
+    def __init__(self, sql, table, values=""):
         self.sql = sql.strip().rstrip(";").strip()
         self.table = table
+        self.values = " ".join(str(values or "").split())
         if not self.sql:
             raise QueryError("Empty SQL.")
         if len(self.sql) > MAX_SQL_LEN:
             raise QueryError("SQL is too long.")
 
     def describe(self):
-        return self.sql
+        """The SQL, and how the model read the values it tests, so a wrong
+        reading of a value is visible next to the number it produced."""
+        return self.sql + ("\nRead values as: %s" % self.values if self.values else "")
 
     def run(self):
         cols, rows, notes = execute(self.sql, self.table, MAX_ROWS + 1, TIME_LIMIT)
@@ -279,11 +276,12 @@ class SqlQuery(object):
         return "\n".join(lines)
 
 
-def execute(sql, table, max_rows, time_limit):
+def execute(sql, table, max_rows, time_limit, rules=None):
     """Run one read-only statement. Returns (column names, rows, notes),
-    where notes say which values could not be read as numbers."""
+    where notes say which values could not be read as numbers. rules, from
+    a clean, rewrite values as they are loaded (see _load)."""
     _check_empty_text(sql, table)
-    conn, notes = _load(table)
+    conn, notes = _load(table, rules)
     notes = _relevant(notes, sql)
     try:
         deadline = time.monotonic() + time_limit
@@ -343,7 +341,7 @@ class SheetResult(object):
         return [[cell(v, self.kinds[i]) for i, v in enumerate(r)] for r in self.rows[:limit]]
 
 
-def run_to_sheet(sql, table):
+def run_to_sheet(sql, table, rules=None):
     """Run sql over every data row, for writing to a new sheet. Total rows
     are left out: copied unchanged they would be stale and would distort any
     average the SQL computes. Output columns named after sheet letters get
@@ -351,7 +349,7 @@ def run_to_sheet(sql, table):
     sql = sql.strip().rstrip(";").strip()
     if not sql:
         raise QueryError("Empty SQL.")
-    cols, rows, notes = execute(sql, table, MAX_SHEET_ROWS + 1, SHEET_TIME_LIMIT)
+    cols, rows, notes = execute(sql, table, MAX_SHEET_ROWS + 1, SHEET_TIME_LIMIT, rules)
     if not cols:
         raise QueryError("The SQL returned no columns.")
     if len(rows) > MAX_SHEET_ROWS:
@@ -370,11 +368,11 @@ def run_to_sheet(sql, table):
             filled = [r[i] for r in rows if r[i] is not None]
             kinds.append("date" if filled and all(is_iso_date(v) for v in filled) else None)
     source = len(table.body) - len(table.skipped)
-    return SheetResult(headers, rows, source, kinds, _left_out(table, cols, rows, index),
+    return SheetResult(headers, rows, source, kinds, _left_out(table, cols, rows, index, rules),
                        [table.where(i) for i in sorted(table.totals)], notes)
 
 
-def _left_out(table, cols, rows, index):
+def _left_out(table, cols, rows, index, rules=None):
     """Labels of source rows missing from the result, when every output column
     is an unchanged source column (filters and de-duplication). None when the
     result was transformed and rows cannot be matched back."""
@@ -382,7 +380,7 @@ def _left_out(table, cols, rows, index):
         return None
     picked = ", ".join('"%s"' % c.lower() for c in cols)
     _, source, _ = execute("SELECT row, %s FROM t ORDER BY row" % picked, table,
-                           MAX_SHEET_ROWS + 1, SHEET_TIME_LIMIT)
+                           MAX_SHEET_ROWS + 1, SHEET_TIME_LIMIT, rules)
     waiting = {}
     for r in source:
         waiting.setdefault(tuple(r[1:]), []).append(r[0])
@@ -421,7 +419,11 @@ def numeric_columns(table):
     return found
 
 
-def _load(table):
+def _load(table, rules=None):
+    """Table t from the data rows. With rules ({(column, value lowered):
+    new value}, from a clean), text is also trimmed, each rule replaces its
+    value, and text in a number column that no rule covers stays text
+    instead of becoming missing, so cleaning never loses a value."""
     if not AVAILABLE:
         raise QueryError("SQLite is not available in this LibreOffice.")
     conn = sqlite3.connect(":memory:")
@@ -432,6 +434,9 @@ def _load(table):
     spelling = stored_spellings(table)
     merged = {}
     dropped = {}
+    applied = {}
+    trimmed = {}
+    kept = {}
     data = []
     for i, row in enumerate(table.body):
         if i in table.skipped:
@@ -439,6 +444,19 @@ def _load(table):
         values = [table.row_number(i)]
         for c in range(table.width):
             v = row[c] if c < len(row) else ""
+            if isinstance(v, str) and v != v.strip():
+                # Outer spaces never mean anything, and left in they make
+                # paid = 'Yes' miss ' Yes '.
+                trimmed[c] = trimmed.get(c, 0) + 1
+                v = v.strip()
+            if rules is not None and isinstance(v, str) and not is_empty(v):
+                key = (c, fmt(v).lower())
+                if key in rules:
+                    new = rules[key]
+                    applied.setdefault((c, fmt(v), new), 0)
+                    applied[(c, fmt(v), new)] += 1
+                    values.append(new)
+                    continue
             if c in logical and v in ("TRUE", "FALSE"):
                 # As in Calc, TRUE is 1 and FALSE is 0, so SUM counts TRUE.
                 values.append(1 if v == "TRUE" else 0)
@@ -448,6 +466,9 @@ def _load(table):
                 values.append(n)
             elif is_empty(v):
                 values.append(None)
+            elif c in numeric and rules is not None:
+                values.append(fmt(v))
+                kept.setdefault(c, []).append(fmt(v))
             elif c in numeric:
                 # Text in a number column ("-", "N/A", "TBC") is a missing value.
                 # Left as text, SQLite would count it as 0 in SUM and AVG.
@@ -465,6 +486,20 @@ def _load(table):
     conn.executemany("INSERT INTO t VALUES (%s)" % ", ".join("?" * (table.width + 1)), data)
     conn.commit()
     notes = []
+    for c in sorted({c for c, _, _ in applied}):
+        changes = sorted(((old, new, n) for (k, old, new), n in applied.items() if k == c),
+                         key=lambda x: (str(x[0]), str(x[1])))
+        notes.append((names[c], "Changed in %s: %s." % (names[c], ", ".join(
+            "'%s' to %s%s" % (old, "empty" if new is None else "'%s'" % fmt(new),
+                              " (%d cells)" % n if n > 1 else "")
+            for old, new, n in changes[:8]))))
+    for c in sorted(trimmed) if rules is not None else ():
+        notes.append((names[c], "Trimmed spaces in %s (%d cell%s)." % (
+            names[c], trimmed[c], "" if trimmed[c] == 1 else "s")))
+    for c in sorted(kept):
+        vals = sorted(set(kept[c]))
+        notes.append((names[c], "Kept as text in number column %s: %s." % (
+            names[c], ", ".join("'%s'" % v for v in vals[:4]))))
     for c in sorted({c for c, _, _ in merged}):
         changes = sorted((old, new, n) for (k, old, new), n in merged.items() if k == c)
         notes.append((names[c], "Merged spellings in %s: %s." % (names[c], ", ".join(
@@ -544,7 +579,7 @@ def parse(raw, snapshot):
         return None
     if not isinstance(data, dict) or not data.get("sql_needed"):
         return None
-    return SqlQuery(str(data.get("sql") or ""), Table(snapshot))
+    return SqlQuery(str(data.get("sql") or ""), Table(snapshot), data.get("values") or "")
 
 
 def no_query_reply():

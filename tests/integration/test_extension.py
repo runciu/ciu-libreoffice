@@ -270,6 +270,56 @@ class Extension(unittest.TestCase):
         self.assertFalse(state["pending"])
         self.assertEqual(self.doc.getSheets().getCount(), 1)
 
+    def test_5g_clean_data(self):
+        sheets = self.doc.getSheets()
+        sheets.insertNewByName("Messy", sheets.getCount())
+        messy = sheets.getByName("Messy")
+        messy.getCellRangeByName("A1:C6").setDataArray((
+            ("Invoice", "Paid", "Amount"), ("I1", "Yes", 10.0), ("I2", "Y", "TBC"),
+            ("I3", "no", 7.0), ("I4", "No", "1,200"), ("I5", " Yes ", 2.0)))
+        ctrl = self.doc.getCurrentController()
+        ctrl.setActiveSheet(messy)
+        ctrl.select(messy.getCellRangeByName("A1:C6"))
+        mock_ciu.STATE.plan_reply = json.dumps({"columns": [
+            {"column": "paid", "rules": [{"from": "Y", "to": "Yes"}, {"from": "Maybe", "to": "No"}]},
+            {"column": "amount", "rules": [{"from": "TBC", "to": ""}]}]})
+        try:
+            OFFICE.hook("prompt:Clean data: TBC means unknown")
+            OFFICE.hook("press:clean")
+            state = wait_done()
+            req = mock_ciu.STATE.last_request
+            self.assertIn("columns", json.dumps(req["response_format"]))
+            self.assertNotIn("TBC", req["messages"][0]["content"].replace("'TBC'", ""))
+            user = req["messages"][1]["content"]
+            self.assertIn("- paid (Paid, text): 'No' x2, 'Yes' x2, 'Y' x1", user)
+            self.assertIn("- amount (Amount, number column; these cells are not numbers): 'TBC' x1", user)
+            self.assertIn("Instructions from the user: TBC means unknown", user)
+            answer = state["answer"]
+            self.assertIn("a cleaned copy in a new sheet 'Cleaned', 5 rows x 3 columns", answer)
+            self.assertIn("Changed in paid: 'Y' to 'Yes'.", answer)
+            self.assertIn("Changed in amount: 'TBC' to empty.", answer)
+            self.assertIn("Trimmed spaces in paid (1 cell).", answer)
+            self.assertIn("amount: 1 number stored as text becomes a number.", answer)
+            self.assertIn("paid 'Maybe': not a value in the column", answer)
+            self.assertEqual(state["apply_label"], "Create sheet")
+            OFFICE.hook("press:apply")
+            new = sheets.getByName("Cleaned")
+            self.assertEqual(new.getCellRangeByName("A1:C6").getDataArray(), (
+                ("Invoice", "Paid", "Amount"), ("I1", "Yes", 10.0), ("I2", "Yes", ""),
+                ("I3", "No", 7.0), ("I4", "No", 1200.0), ("I5", "Yes", 2.0)))
+            self.assertEqual(messy.getCellRangeByName("B3").getString(), "Y")
+        finally:
+            for name in ("Cleaned", "Messy"):
+                if sheets.hasByName(name):
+                    sheets.removeByName(name)
+            ctrl.setActiveSheet(self.sheet)
+            ctrl.select(self.sheet.getCellRangeByName("A1:B5"))
+
+    def test_5h_find_issues_suggests_clean(self):
+        OFFICE.hook("press:quick:2")
+        state = wait_done()
+        self.assertNotIn("Tip: Clean data", state["answer"])
+
     def test_6a_propose_preview_apply(self):
         mock_ciu.STATE.plan_reply = json.dumps({
             "summary": "Add VAT column.", "operations": [

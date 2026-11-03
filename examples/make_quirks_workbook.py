@@ -144,6 +144,14 @@ def answers():
         ("Invoices", "Propose change", "Make a clean copy with Paid as Yes or No and Amount as numbers, in a new sheet", "",
          "18 rows; Paid only Yes/No (blank becomes No); Amount 1200.5, 1450 and -120 for the text amounts; account codes keep their zeros.",
          "Normalising categories and numbers without losing IDs."),
+        ("Invoices", "Clean data", "(press the Clean data button)", "",
+         "Preview: CIU reads Paid 'Y' as 'Yes' (check it); standard fixes merge 'no'/'yes', turn 3 text amounts "
+         "into numbers and 3 text due dates into dates; the Grand total row is not copied. Create sheet gives 18 rows. "
+         "Then ask the outstanding and overdue questions on the new sheet.",
+         "The model interprets values, code applies the rules to every row."),
+        ("Staff", "Clean data", "Clean data: TBC means unknown (type this, then press Clean data)", "",
+         "Salary 'TBC' becomes empty; subtotal rows are not copied; 7 rows.",
+         "Refining the rules by typing an instruction."),
         ("Invoices", "Propose change", "Add a column with VAT amount", "",
          "Formula like =G4*H4 in column K. The preview should show K4 = 240 (1200 x 20%). Text amounts give #VALUE! or are converted.",
          "Percent stored as fraction; text numbers in formulas."),

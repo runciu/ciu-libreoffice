@@ -45,7 +45,7 @@ class RunToSheet(unittest.TestCase):
         # City is a text column, so its markers stay text and are matched by value.
         r = S.run_to_sheet(sql, table())
         self.assertEqual([row[0] for row in r.rows], ["Ann", "Ann", "Bob"])
-        self.assertIn("Merged spellings in name: ' ann ' as 'Ann'.", r.notes)
+        self.assertIn("Merged spellings in name: 'ann' as 'Ann'.", r.notes)
 
     def test_values_are_calc_ready(self):
         r = S.run_to_sheet("SELECT name, sales, COUNT(*) AS n FROM t GROUP BY name ORDER BY row", table())

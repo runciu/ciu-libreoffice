@@ -143,14 +143,15 @@ class ColumnProfile(object):
         else:
             self.kind = "mixed (%d numbers, %d text)" % (len(nums), len(texts))
         # Values grouped ignoring case and outer spaces; each group is shown
-        # in its most common spelling, so counts never invent a casing.
+        # in its most common spelling (capitalised on a tie), so counts never
+        # invent a casing.
         groups = {}
         for v in filled:
             shown = fmt(v).strip()
             key = shown.lower()
             g = groups.setdefault(key, {})
             g[shown] = g.get(shown, 0) + 1
-        self.groups = sorted(((sum(g.values()), max(g, key=g.get), sorted(g)) for g in groups.values()),
+        self.groups = sorted(((sum(g.values()), max(g, key=lambda k: (g[k], k[:1].isupper())), sorted(g)) for g in groups.values()),
                              key=lambda x: (-x[0], x[1]))
         self.unique = len(groups)
         self.duplicates = sum(n - 1 for n, _, _ in self.groups if n > 1)

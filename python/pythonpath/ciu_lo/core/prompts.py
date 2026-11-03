@@ -27,7 +27,7 @@ MIN_CONTEXT_TOKENS = 200
 MAX_CONTEXT_TOKENS = 8000
 SAFETY = 0.9
 RESULT_TOKENS = 500
-QUERY_REPLY_TOKENS = 200
+QUERY_REPLY_TOKENS = 280
 
 # Applied to the selection budget on successive attempts if the server still
 # reports the context as full (a tokenizer that counts differently).

@@ -113,11 +113,11 @@ class Results(unittest.TestCase):
                 ["I3", "No ", "Bright"], ["I4", "Yes", "Acme"]]
         out = run("SELECT COUNT(*) FROM t WHERE paid = 'No'", snapshot(rows))
         self.assertIn("\n3", out)
-        self.assertIn("Merged spellings in paid: 'No ' as 'No', 'no' as 'No'.", out)
+        self.assertIn("Merged spellings in paid: 'no' as 'No'.", out)
         self.assertNotIn("client", out)
         out = run("SELECT COUNT(*) FROM t WHERE client = 'Acme'", snapshot(rows))
         self.assertIn("\n3", out)
-        self.assertIn("Merged spellings in client: ' acme ' as 'Acme'.", out)
+        self.assertIn("Merged spellings in client: 'acme' as 'Acme'.", out)
         self.assertNotIn("in paid", out)
 
     def test_result_capped(self):
@@ -131,23 +131,31 @@ class Results(unittest.TestCase):
         self.assertIn("\nAfrica", out)
 
 
-class YesNo(unittest.TestCase):
+class ValuesField(unittest.TestCase):
     ROWS = [["Invoice", "Paid", "Amount"], ["I1", "Yes", 10.0], ["I2", "Y", 5.0],
             ["I3", "no", 7.0], ["I4", "No", 3.0], ["I5", "No", 2.0], ["I6", "", 1.0]]
 
-    def test_short_forms_stored_as_full_words(self):
+    def test_meaning_left_to_the_model(self):
         snap = snapshot(self.ROWS)
-        out = run("SELECT COUNT(*) FROM t WHERE paid = 'Yes'", snap)
-        self.assertTrue(out.endswith("\n2"), out)
-        self.assertIn("'Y' as 'Yes'", out)
-        self.assertIn("paid (Paid; values: 'No', 'Yes', some empty)",
+        self.assertIn("paid (Paid; values: 'No', 'Y', 'Yes', some empty)",
                       S.table_note(context.Table(snap)))
+        out = run("SELECT COUNT(*) FROM t WHERE paid = 'Y'", snap)
+        self.assertTrue(out.endswith("\n1"), out)
 
-    def test_short_forms_kept_without_full_words(self):
-        rows = [["Code", "Flag"], ["a", "Y"], ["b", "N"], ["c", "Y"]]
-        self.assertTrue(run("SELECT COUNT(*) FROM t WHERE flag = 'Y'", snapshot(rows)).endswith("\n2"))
-        rows = [["Name", "Size"], ["a", "Y"], ["b", "Yes"], ["c", "XL"], ["d", "Y"]]
-        self.assertTrue(run("SELECT COUNT(*) FROM t WHERE size = 'Y'", snapshot(rows)).endswith("\n2"))
+    def test_reading_shown_with_the_sql(self):
+        raw = json.dumps({"sql_needed": True, "values": "paid: Yes, Y = paid;  No, empty = unpaid",
+                          "sql": "SELECT COUNT(*) FROM t WHERE paid IN ('Yes', 'Y')"})
+        q = S.parse(raw, snapshot(self.ROWS))
+        self.assertEqual(q.describe(), "SELECT COUNT(*) FROM t WHERE paid IN ('Yes', 'Y')\n"
+                                       "Read values as: paid: Yes, Y = paid; No, empty = unpaid")
+        self.assertTrue(q.run().endswith("\n2"))
+        self.assertEqual(S.parse(json.dumps({"sql_needed": True, "sql": "SELECT 1"}),
+                                 snapshot(self.ROWS)).describe(), "SELECT 1")
+
+    def test_schema_asks_for_values_before_sql(self):
+        props = list(S.SCHEMA["properties"])
+        self.assertLess(props.index("values"), props.index("sql"))
+        self.assertIn('"values": "status:', S.instructions(context.Table(snapshot(self.ROWS))))
 
 
 class EmptyText(unittest.TestCase):

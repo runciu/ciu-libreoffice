@@ -10,12 +10,13 @@ import unohelper
 from com.sun.star.awt import XActionListener, XTopWindowListener
 
 from ..calc import executor, reader
+from ..core import clean as cleanmod
 from ..core import prompts
 from ..core import engine as enginemod
 from ..core.query import QueryError
 from ..core import sql as sqlmod
 from ..core.context import Table
-from ..core.plan import SHEET_TOOL, PlanError, parse_plan, plan_schema
+from ..core.plan import SHEET_TOOL, Operation, Plan, PlanError, parse_plan, plan_schema
 from ..core.ciu_client import CIUClient, CIUError
 from ..core.context import summary_line
 from .mainthread import MainThread
@@ -69,6 +70,7 @@ class AssistantDialog(object):
 
         self._button("btnAsk", PAD, y, 52, 14, "Ask", "ask")
         self._button("btnChange", PAD + 56, y, 84, 14, "Propose change", "change")
+        self._button("btnClean", PAD + 144, y, 60, 14, "Clean data", "clean")
         self._button("btnStop", W - PAD - 52, y, 52, 14, "Stop", "stop")
         y += 19
 
@@ -150,6 +152,8 @@ class AssistantDialog(object):
             self.ask(self._get("txtPrompt"))
         elif command == "change":
             self.propose(self._get("txtPrompt"))
+        elif command == "clean":
+            self.clean(self._get("txtPrompt"))
         elif command == "apply":
             self.apply_pending()
         elif command == "discard":
@@ -162,7 +166,7 @@ class AssistantDialog(object):
         elif command.startswith("quick:"):
             title, question, issues = prompts.QUICK_ACTIONS[int(command.split(":")[1])]
             self._set("txtPrompt", question)
-            self.ask(question, with_query=False, issues=issues)
+            self.ask(question, with_query=False, issues=issues, tip=title == "Find issues")
 
     def refresh_scope(self):
         try:
@@ -175,13 +179,24 @@ class AssistantDialog(object):
             self._label_set("lblScope", "Selection: could not read (%s)" % e)
         return None
 
-    def ask(self, question, with_query=True, issues=False):
-        self._start(question, lambda snap, text: self._work(snap, text, with_query, issues))
+    def ask(self, question, with_query=True, issues=False, tip=False):
+        self._start(question, lambda snap, text: self._work(snap, text, with_query, issues, tip))
 
     def propose(self, request):
         self._start(request, self._work_plan)
 
-    def _start(self, text, worker):
+    def clean(self, typed):
+        """Typed text that starts with "Clean data" refines the rules, as in
+        "Clean data: keep TBC as text"; anything else is ignored."""
+        typed = (typed or "").strip()
+        guidance = ""
+        if typed.lower().startswith("clean data"):
+            guidance = typed[len("clean data"):].lstrip(" :,-").strip()
+        else:
+            self._set("txtPrompt", "Clean data")
+        self._start("Clean data", lambda snap, _: self._work_clean(snap, guidance), full=True)
+
+    def _start(self, text, worker, full=False):
         if self.busy:
             return
         text = (text or "").strip()
@@ -193,6 +208,12 @@ class AssistantDialog(object):
         if snap is None:
             self._show_answer("Select some cells in the sheet, then try again.")
             return
+        if full:
+            try:
+                snap = reader.read_full(self._model_doc(), snap)
+            except reader.SelectionError as e:
+                self._show_answer(str(e))
+                return
         self._clear_pending()
         self._show_answer("")
         self.stop_event.clear()
@@ -249,7 +270,88 @@ class AssistantDialog(object):
         finally:
             self.ui.post(lambda: self._set_busy(False))
 
-    def _work(self, snap, question, with_query=True, issues=False):
+    def _work_clean(self, snap, guidance):
+        try:
+            status = self.client.status()
+            self.ui.post(lambda: self._apply_status(status))
+            if not status.ready:
+                self.ui.post(lambda: self._show_answer(status.describe()))
+                return
+            table = Table(snap)
+            cands = cleanmod.candidates(table)
+            rules, rejected, skipped = {}, [], []
+            if cands:
+                n = len(cands)
+                self.ui.post(lambda: self._show_answer(
+                    "Reading the values in %d column%s..." % (n, "" if n == 1 else "s")))
+                asked = {}
+
+                def build(scale):
+                    messages, kept, left = cleanmod.build_messages(cands, guidance,
+                                                                   status.n_ctx, scale)
+                    asked["kept"], asked["left"] = kept, left
+                    return messages, cleanmod.REPLY_TOKENS
+
+                raw = self._fit_and_send(build, lambda messages, max_tokens: self.client.chat_json(
+                    messages, cleanmod.SCHEMA, max_tokens=max_tokens))
+                rules, rejected = cleanmod.parse_rules(raw, asked["kept"])
+                skipped = asked["left"]
+            if self.stop_event.is_set():
+                self.ui.post(lambda: self._show_answer("Stopped. Nothing was changed."))
+                return
+            try:
+                cleaning = cleanmod.Cleaning(table, rules, rejected, skipped)
+            except QueryError as e:
+                msg = str(e)
+                self.ui.post(lambda: self._show_answer("Could not clean this selection: " + msg))
+                return
+            self.ui.post(lambda: self._show_clean(cleaning, snap))
+        except CIUError as e:
+            msg = str(e)
+            self.ui.post(lambda: self._show_answer(msg))
+        except Exception:
+            tb = traceback.format_exc()
+            self.ui.post(lambda: self._show_answer("Unexpected error:\n" + tb))
+        finally:
+            self.ui.post(lambda: self._set_busy(False))
+
+    def _show_clean(self, cleaning, snap):
+        if not cleaning.changes:
+            lines = ["Nothing to clean: no values to standardise, no spacing or case "
+                     "differences, and no numbers or dates stored as text."]
+            if cleaning.rejected:
+                lines += ["", "Rules not used:"] + ["  %s '%s': %s" % x for x in cleaning.rejected[:6]]
+            self._show_answer("\n".join(lines))
+            return
+        result = cleaning.result
+        lines = [cleaning.describe(), "", "First rows:",
+                 " | ".join(_clip(h, 24) for h in result.headers)]
+        for row in result.readable(5):
+            lines.append(" | ".join(_clip(v, 24) for v in row))
+        if len(result.rows) > 5:
+            lines.append("...")
+        lines += ["", "This sheet is not changed. To change a rule, type for example "
+                      "'Clean data: keep TBC as text' and press Clean data again.",
+                  "Click Create sheet to make the copy, or Discard."]
+        self._show_answer("\n".join(lines))
+        op = Operation(SHEET_TOOL, None, sql=cleaning.sql, sheet=cleanmod.SHEET)
+        self.pending = (Plan("Clean data", [op], sheet=snap.sheet), result)
+        self.dm.getByName("btnApply").Label = "Create sheet"
+        self._refresh_buttons()
+
+    def _clean_tip(self, snap):
+        """One line pointing to Clean data when it has something to fix."""
+        try:
+            table = Table(snap)
+            if any(k.numeric for k in cleanmod.candidates(table)) or \
+                    cleanmod.Cleaning(table, {}).changes:
+                return ("\n\nTip: Clean data can make a cleaned copy (consistent values, "
+                        "numbers and dates stored as text fixed) for you to check first.")
+        except Exception:
+            pass
+        return ""
+
+    def _work(self, snap, question, with_query=True, issues=False, tip=False):
         try:
             status = self.client.status()
             self.ui.post(lambda: self._apply_status(status))
@@ -270,6 +372,10 @@ class AssistantDialog(object):
             elif self.client.last_finish == "repetition":
                 self.ui.post(lambda: self._append_answer(
                     "\n[stopped: the answer was repeating itself; try a narrower question]"))
+            if tip and not self.stop_event.is_set():
+                text = self._clean_tip(snap)
+                if text:
+                    self.ui.post(lambda: self._append_answer(text))
         except _Reroute:
             # A change typed into Ask: run Propose change instead of refusing.
             self._work_plan(snap, question)

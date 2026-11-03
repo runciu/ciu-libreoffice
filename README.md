@@ -8,7 +8,7 @@ Version 0.0.1. Calc only for now.
 
 **Ask.** Get a streamed answer about the selected cells, or use one of the shortcuts: Summarise, Explain formulas, Find issues.
 
-Questions that need every row, such as "which African country grew most" on a 240-row table, are answered with an exact query. The model writes one SQL `SELECT` over the selection, the extension runs it over all rows, and the result goes back to the model before it answers. The window shows the SQL it ran. If the query fails, the model sees the error and gets one chance to correct it. SQL columns are named after their headers (`unit_price` for "Unit price"); a column without a usable header keeps its letter.
+Questions that need every row, such as "which African country grew most" on a 240-row table, are answered with an exact query. The model writes one SQL `SELECT` over the selection, the extension runs it over all rows, and the result goes back to the model before it answers. The window shows the SQL it ran. If the query fails, the model sees the error and gets one chance to correct it. SQL columns are named after their headers (`unit_price` for "Unit price"); a column without a usable header keeps its letter. Before the SQL, the model says how it reads the values it tests ("paid: Yes, Y = paid; No, empty = unpaid"), and the window shows that next to the SQL, so a misread value is easy to spot.
 
 The SQL runs in a locked-down, in-memory SQLite database:
 - Only reading is allowed. Writes, `ATTACH`, `PRAGMA` and extension loading are refused, so it cannot touch your files or the network.
@@ -24,6 +24,8 @@ If LibreOffice's Python has no SQLite, a simpler built-in query form is used ins
 | `set_formula` | one formula in one cell |
 | `fill_formula` | a formula filled down a column or across a row, like dragging the fill handle |
 | `set_values` | plain text or numbers in a range |
+
+**Clean data.** The **Clean data** button makes a cleaned copy in a new sheet. CIU looks at the distinct values of each category column and decides what they mean: `Y` and `settled` as `Yes`, `Brite` as `Bright`, `TBC` as empty. Code then applies those rules to every row, so it works the same on 20 rows or 20,000 and the model never retypes your data. Fixes that need no judgement are made by code alone: outer spaces, case differences, and numbers and dates stored as text. The preview lists every change with how many cells it affects, keeping the values CIU interpreted apart from the standard fixes, and nothing happens until you press **Create sheet**. To change a rule, type for example `Clean data: keep TBC as text` and press Clean data again. Find issues suggests Clean data when it would fix something.
 
 **Clean into a new sheet.** Ask for things like "remove duplicate countries", "make a copy without the rows that have missing values", "fill missing Units with the average", or "a table of total population per region". CIU writes one SQL `SELECT` (in the same sandbox as Ask), and the result goes to a **new sheet**; the original sheet is never changed. The preview shows how many rows are kept, names the rows left out when it can, says total rows are not copied, and shows the SQL and the first rows. **Create sheet** adds the new sheet next to the original, with dates and percentages formatted as in the source, and one undo removes it. The copy holds values, not formulas.
 
@@ -51,7 +53,6 @@ CIU reads values the way Calc shows them, so a value means the same thing in a f
 | `00123` | `00123` | a leading zero marks a code, so it stays text |
 | TRUE / FALSE | TRUE / FALSE, or 1 / 0 in SQL | so SUM counts TRUE, as in Calc |
 | `no`, `No`, ` No ` | `No` in SQL (the most common spelling) | the result says which spellings were merged |
-| `Y` / `N` beside `Yes` / `No` | `Yes` / `No` in SQL | only in a column holding nothing but yes/no values |
 | `-`, `N/A`, `TBC` in a number column | missing | the answer says which values were treated as missing |
 
 Total and subtotal rows are left out of statistics, queries and copies, and wholly empty rows are skipped. If you click one cell and more data continues below a blank row, the selection line says so. Title rows above the header (a report name, an "As of" date) are not treated as data; their text is passed along as context, so "overdue on the As of date" still works. A comparison such as `paid = ''` on a column with empty cells is refused with the fix (`paid IS NULL`), because empty cells are NULL in SQL and would silently be left out.
