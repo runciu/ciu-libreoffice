@@ -406,16 +406,24 @@ def find_issues(table, limit=14):
         if p.typed_dates:
             issues.append("%s: %d date%s typed as text (%s); Calc cannot calculate with them." % (
                 name, len(p.typed_dates), "" if len(p.typed_dates) == 1 else "s", _rows_text(p.typed_dates)))
+        rows_of = {}
+        for r, v in filled:
+            rows_of.setdefault(fmt(v).strip(), []).append(r)
         for n, shown, spellings in p.groups:
             if len(spellings) > 1:
-                issues.append("%s: the same value is spelled %s." % (
-                    name, " / ".join(_quote(v) for v in spellings[:4])))
+                # Name the rows of the less common spellings: those are the
+                # cells someone would change.
+                minority = [v for v in spellings if v != shown]
+                issues.append("%s: %s is also written %s." % (
+                    name, _quote(shown), ", ".join("%s (%s)" % (_quote(v), _rows_text(rows_of.get(v, [])))
+                                                  for v in minority[:3])))
         if 1 < p.unique <= 12:
             words = [shown for _, shown, _ in p.groups if isinstance(shown, str)]
             for short in [w for w in words if len(w.strip()) == 1]:
                 longer = [w for w in words if len(w) > 1 and w[0].lower() == short.strip().lower()]
                 if len(longer) == 1:
-                    issues.append("%s: %s probably means %s." % (name, _quote(short), _quote(longer[0])))
+                    issues.append("%s: %s (%s) probably means %s." % (
+                        name, _quote(short), _rows_text(rows_of.get(short.strip(), [])), _quote(longer[0])))
         spaced = [r for r, v in filled if isinstance(v, str) and v != v.strip()]
         if spaced:
             issues.append("%s: extra spaces at the start or end (%s)." % (name, _rows_text(spaced)))
@@ -571,8 +579,10 @@ def render(snapshot, budget=2000, max_formulas=25, measure=estimate_tokens):
     used = sum(measure(t) + 1 for t in table)
     shown = 0
     for r, row in enumerate(snapshot.rows):
-        line = "%d\t%s" % (snapshot.start_row + r + 1,
-                           "\t".join(_cell_text(v) for v in row))
+        # Label the header line so it is never read as a row of data.
+        number = "%d (header)" % (snapshot.start_row + 1) if header and r == 0 \
+            else "%d" % (snapshot.start_row + r + 1)
+        line = "%s\t%s" % (number, "\t".join(_cell_text(v) for v in row))
         cost = measure(line) + 1
         if used + cost > remaining:
             break

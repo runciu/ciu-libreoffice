@@ -173,7 +173,9 @@ QUICK_ACTIONS = [
     ("Explain formulas", "Explain what the formulas in this selection do, in "
                          "plain language, and point out any that look wrong.", False),
     ("Find issues", "Summarise the problems in this data, using the issues found by "
-                    "exact checks as your source. Group them by type. For each, one "
+                    "exact checks as your source, with the rows they give. Add an "
+                    "issue of your own only if you can name its exact cell and it is "
+                    "clearly wrong. Group them by type. For each, one "
                     "line: what is wrong, how many cells, at most three example cells, "
                     "and a suggested fix. Do not list every cell, do not treat the "
                     "header or total rows as data, and do not report repeated values "
