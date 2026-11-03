@@ -49,6 +49,14 @@ class Dates(unittest.TestCase):
         self.assertFalse(V.is_percent_text("ten%"))
 
 
+class Display(unittest.TestCase):
+    def test_format_number_keeps_digits(self):
+        for v, want in [(23516.25, "23516.25"), (1782.0138888, "1782.0139"), (0.0468, "0.0468"),
+                        (1425887337.0, "1425887337"), (-120.0, "-120"), (0.080555555, "0.0805556"),
+                        (0.1 + 0.2, "0.3")]:
+            self.assertEqual(V.format_number(v), want, v)
+
+
 class ApplyKinds(unittest.TestCase):
     def test_reader_kinds_convert_values(self):
         rows = [["Due", "Remote", "When"], [46297.0, 1.0, 46297.5], ["15/11/2026", 0.0, ""],

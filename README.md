@@ -8,7 +8,7 @@ Version 0.0.1. Calc only for now.
 
 **Ask.** Get a streamed answer about the selected cells, or use one of the shortcuts: Summarise, Explain formulas, Find issues.
 
-Questions that need every row, such as "which African country grew most" on a 240-row table, are answered with an exact query. The model writes one SQL `SELECT` over the selection, the extension runs it over all rows, and the result goes back to the model before it answers. The window shows the SQL it ran. If the query fails, the model sees the error and gets one chance to correct it.
+Questions that need every row, such as "which African country grew most" on a 240-row table, are answered with an exact query. The model writes one SQL `SELECT` over the selection, the extension runs it over all rows, and the result goes back to the model before it answers. The window shows the SQL it ran. If the query fails, the model sees the error and gets one chance to correct it. SQL columns are named after their headers (`unit_price` for "Unit price"); a column without a usable header keeps its letter.
 
 The SQL runs in a locked-down, in-memory SQLite database:
 - Only reading is allowed. Writes, `ATTACH`, `PRAGMA` and extension loading are refused, so it cannot touch your files or the network.
@@ -50,6 +50,7 @@ CIU reads values the way Calc shows them, so a value means the same thing in a f
 | `£1,200.50`, `1,450`, `(120.00)` | 1200.5, 1450, -120 | |
 | `00123` | `00123` | a leading zero marks a code, so it stays text |
 | TRUE / FALSE | TRUE / FALSE, or 1 / 0 in SQL | so SUM counts TRUE, as in Calc |
+| `no`, `No`, ` No ` | `No` in SQL (the most common spelling) | the result says which spellings were merged |
 | `-`, `N/A`, `TBC` in a number column | missing | the answer says which values were treated as missing |
 
 Total and subtotal rows are left out of statistics, queries and copies, and wholly empty rows are skipped. If you click one cell and more data continues below a blank row, the selection line says so.

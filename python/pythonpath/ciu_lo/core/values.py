@@ -66,6 +66,19 @@ def to_number(v):
     return -f if negative else f
 
 
+def format_number(v):
+    """A number for display without float noise or lost digits: 23516.25,
+    1782.0139, 0.0468, 1425887337. Rounding to a few significant figures is
+    wrong for totals: it showed 23516.25 as 23516.2."""
+    if not math.isfinite(v):
+        return str(v)
+    if v == int(v) and abs(v) < 1e15:
+        return str(int(v))
+    if abs(v) >= 1:
+        return ("%.4f" % v).rstrip("0").rstrip(".")
+    return "%.6g" % v
+
+
 def is_percent_text(v):
     return isinstance(v, str) and v.strip().lstrip("'").rstrip().endswith("%") and \
         to_number(v) is not None

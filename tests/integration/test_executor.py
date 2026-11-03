@@ -175,7 +175,7 @@ class Executor(unittest.TestCase):
         from ciu_lo.core.context import Table
         self.doc.getCurrentController().select(self.cell("A1:C4"))
         snap = reader.read_full(self.doc, reader.read_selection(self.doc))
-        result = S.run_to_sheet("SELECT a, b * c AS total FROM t ORDER BY total DESC", Table(snap))
+        result = S.run_to_sheet("SELECT item, price * qty AS total FROM t ORDER BY total DESC", Table(snap))
         before = self.sheet.getCellRangeByName("A1:C4").getFormulaArray()
         self.doc.getSheets().insertNewByName("Cleaned", 1)
         res = executor.apply_sheet(self.doc, "Cleaned", result, "Sales")
@@ -211,7 +211,7 @@ class Executor(unittest.TestCase):
         self.doc.getCurrentController().select(self.cell("H1:J4"))
         snap = reader.read_full(self.doc, reader.read_selection(self.doc))
         self.assertEqual(snap.rows[1], ["2026-10-02", 0.2, "TRUE"])
-        result = S.run_to_sheet("SELECT h, i, j FROM t WHERE h < '2026-12-01' ORDER BY row",
+        result = S.run_to_sheet("SELECT due, rate, remote FROM t WHERE due < '2026-12-01' ORDER BY row",
                                 Table(snap))
         self.assertEqual(result.readable(), [["2026-10-02", "20%", "TRUE"],
                                              ["2026-11-14", "5%", "FALSE"]])

@@ -11,7 +11,7 @@ import math
 import re
 
 from .context import Table, col_letter, fmt, is_num
-from .values import to_number
+from .values import format_number, to_number
 
 MAX_LIMIT = 20
 DEFAULT_LIMIT = 10
@@ -332,9 +332,7 @@ class Query(object):
 
 
 def _num(v):
-    if v == int(v) and abs(v) < 1e15:
-        return str(int(v))
-    return "%.6g" % v
+    return format_number(v)
 
 
 def _short(v):

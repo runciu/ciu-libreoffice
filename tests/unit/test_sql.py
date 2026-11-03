@@ -28,31 +28,31 @@ def fails(test, sql, needle="", snap=None):
 
 class Results(unittest.TestCase):
     def test_largest_increase_in_africa(self):
-        out = run("SELECT a, c - b AS increase FROM t WHERE LOWER(e) = 'africa' "
+        out = run("SELECT country, pop_2023 - pop_2022 AS increase FROM t WHERE region = 'Africa' "
                   "ORDER BY increase DESC LIMIT 2")
         lines = out.splitlines()
         self.assertEqual(lines[1], "2 rows:")
-        self.assertEqual(lines[2], "a | increase")
+        self.assertEqual(lines[2], "country | increase")
         self.assertEqual(lines[3], "Nigeria | 5263420")
         self.assertEqual(lines[4], "Egypt | 1726495")
 
     def test_group_by(self):
-        out = run("SELECT e, COUNT(*), SUM(b) FROM t GROUP BY e ORDER BY SUM(b) DESC")
+        out = run("SELECT region, COUNT(*), SUM(pop_2022) FROM t GROUP BY region ORDER BY 3 DESC")
         self.assertIn("Asia | 2 | 2842352742", out)
         self.assertIn("Africa | 4 | 393464020", out)
 
     def test_percent_text_is_numeric(self):
-        out = run("SELECT a, d FROM t ORDER BY d LIMIT 1")
+        out = run("SELECT country, change FROM t ORDER BY change LIMIT 1")
         self.assertIn("Bulgaria | -0.0044", out)
-        self.assertIn("COUNT(*)\n2", run("SELECT COUNT(*) FROM t WHERE d < 0").replace(" ", ""))
+        self.assertIn("COUNT(*)\n2", run("SELECT COUNT(*) FROM t WHERE change < 0").replace(" ", ""))
 
     def test_text_in_number_column_is_null(self):
         rows = [["Item", "Price", "Note"], ["a", 7.0, "ok"], ["b", 7.0, "ok"], ["c", 7.2, "-"],
                 ["d", 6.9, "ok"], ["e", "-", "late"], ["f", "N/A", "ok"]]
         snap = snapshot(rows)
-        self.assertIn("\n7.025", run("SELECT AVG(b) FROM t", snap))
-        self.assertIn("\n2", run("SELECT COUNT(*) FROM t WHERE b IS NULL", snap))
-        self.assertIn("\n1", run("SELECT COUNT(*) FROM t WHERE c = '-'", snap))
+        self.assertIn("\n7.025", run("SELECT AVG(price) FROM t", snap))
+        self.assertIn("\n2", run("SELECT COUNT(*) FROM t WHERE price IS NULL", snap))
+        self.assertIn("\n1", run("SELECT COUNT(*) FROM t WHERE note = '-'", snap))
 
     def test_types_from_the_quirks_workbook(self):
         rows = [["Invoice", "Account", "Due", "Amount", "VAT", "Paid", "Remote"],
@@ -62,46 +62,63 @@ class Results(unittest.TestCase):
                 ["I3", "00123", "2026-12-24", "(120.00)", 0.2, "no", "TRUE"],
                 ["I4", "00777", "2026-12-02", "TBC", 0.05, "Y", "FALSE"]]
         snap = context.Snapshot("d", "S", 0, 0, rows, kinds={4: "percent", 6: "logical"})
-        out = run("SELECT a FROM t WHERE b = '00123' ORDER BY row", snap)
+        out = run("SELECT invoice FROM t WHERE account = '00123' ORDER BY row", snap)
         self.assertIn("I1\nI3", out)
-        self.assertIn("\n2280.5", run("SELECT SUM(d) FROM t", snap))
-        self.assertIn("Column d: 1 value could not be read as a number and was treated as "
-                      "missing ('TBC').", run("SELECT SUM(d) FROM t", snap))
-        self.assertIn("I3\nI4", run("SELECT a FROM t WHERE c >= '2026-12-01' ORDER BY row", snap))
-        self.assertIn("COUNT(*) | SUM(g)\n4 | 2", run("SELECT COUNT(*), SUM(g) FROM t", snap))
+        self.assertIn("\n2280.5", run("SELECT SUM(amount) FROM t", snap))
+        self.assertIn("Column amount: 1 value could not be read as a number and was treated as "
+                      "missing ('TBC').", run("SELECT SUM(amount) FROM t", snap))
+        self.assertIn("I3\nI4", run("SELECT invoice FROM t WHERE due >= '2026-12-01' ORDER BY row", snap))
+        self.assertIn("COUNT(*) | SUM(remote)\n4 | 2", run("SELECT COUNT(*), SUM(remote) FROM t", snap))
         text = S.table_note(context.Table(snap)) + "\n" + S.instructions(context.Table(snap))
-        self.assertIn("c (Due; date)", text)
-        self.assertIn("e (VAT; fraction shown as %)", text)
-        self.assertIn("f (Paid; values: ", text)
+        self.assertIn("due (Due; date)", text)
+        self.assertIn("vat (VAT; fraction shown as %)", text)
+        self.assertIn("paid (Paid; values: ", text)
         self.assertIn("some empty)", text)
-        self.assertIn("g (Remote; TRUE/FALSE stored as 1/0)", text)
-        self.assertIn("(c < '2026-12-01')", text)
+        self.assertIn("remote (Remote; TRUE/FALSE stored as 1/0)", text)
+        self.assertIn("(due < '2026-12-01')", text)
         self.assertIn("TRUE/FALSE cells are 1 and 0", text)
-        self.assertIn("First rows of t, as stored: (row=2, a='I1', b='00123', c='2026-10-02', "
-                      "d=1200, e=0.2, f='Yes', g=1)", text)
+        self.assertIn("First rows of t, as stored: (row=2, invoice='I1', account='00123', "
+                      "due='2026-10-02', amount=1200, vat=0.2, paid='Yes', remote=1)", text)
         self.assertIn("t holds only data rows: no header row and no total rows", text)
         self.assertIn("Do all arithmetic in SQL", text)
 
     def test_row_column_is_sheet_row(self):
-        self.assertIn("9 | Nigeria", run("SELECT row, a FROM t WHERE a = 'Nigeria'"))
+        self.assertIn("9 | Nigeria", run("SELECT row, country FROM t WHERE country = 'Nigeria'"))
 
     def test_totals_excluded(self):
-        out = run("SELECT a FROM t ORDER BY b DESC LIMIT 1", with_world())
+        out = run("SELECT country FROM t ORDER BY pop_2022 DESC LIMIT 1", with_world())
         self.assertIn("\nChina", out)
         self.assertIn("Total rows were left out.", out)
-        self.assertIn("\n0", run("SELECT COUNT(*) FROM t WHERE a = 'World'", with_world()))
+        self.assertIn("\n0", run("SELECT COUNT(*) FROM t WHERE country = 'World'", with_world()))
 
-    def test_offset_selection_uses_sheet_letters(self):
+    def test_offset_selection(self):
         snap = snapshot(start_col=2, start_row=4)
-        self.assertIn("Nigeria | 5263420",
-                      run("SELECT c, e - d FROM t WHERE g = 'Africa' ORDER BY 2 DESC LIMIT 1", snap))
+        self.assertIn("Nigeria | 5263420", run(
+            "SELECT country, pop_2023 - pop_2022 FROM t WHERE region = 'Africa' "
+            "ORDER BY 2 DESC LIMIT 1", snap))
 
-    def test_keyword_letters_renamed(self):
-        rows = [["H%d" % i for i in range(80)], [float(i) for i in range(80)]]
+    def test_names_from_headers(self):
+        rows = [["Order", "Group", "Row", "Unit price (£)", "2024", "", "Unit Price £", "x" * 50],
+                [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]]
         names = S.column_names(context.Table(snapshot(rows)))
-        self.assertIn("as_", names)
-        self.assertIn("by_", names)
-        self.assertEqual(run("SELECT as_, by_ FROM t", snapshot(rows)).splitlines()[-1], "44 | 76")
+        self.assertEqual(names, ["order_", "group_", "row_", "unit_price", "e", "f",
+                                 "unit_price_2", "x" * 30])
+        self.assertEqual(run("SELECT order_, row_, unit_price_2 FROM t",
+                             snapshot(rows)).splitlines()[-1], "1 | 3 | 7")
+        rows = [["H%d" % i for i in range(80)], [float(i) for i in range(80)]]
+        self.assertEqual(S.column_names(context.Table(snapshot(rows)))[:2], ["h0", "h1"])
+
+    def test_spellings_merged(self):
+        rows = [["Invoice", "Paid", "Client"], ["I1", "No", "Acme"], ["I2", "no", " acme "],
+                ["I3", "No ", "Bright"], ["I4", "Yes", "Acme"]]
+        out = run("SELECT COUNT(*) FROM t WHERE paid = 'No'", snapshot(rows))
+        self.assertIn("\n3", out)
+        self.assertIn("Merged spellings in paid: 'No ' as 'No', 'no' as 'No'.", out)
+        self.assertNotIn("client", out)
+        out = run("SELECT COUNT(*) FROM t WHERE client = 'Acme'", snapshot(rows))
+        self.assertIn("\n3", out)
+        self.assertIn("Merged spellings in client: ' acme ' as 'Acme'.", out)
+        self.assertNotIn("in paid", out)
 
     def test_result_capped(self):
         rows = [["n", "v"]] + [["x%d" % i, float(i)] for i in range(100)]
@@ -110,15 +127,15 @@ class Results(unittest.TestCase):
         self.assertIn("(more rows not shown)", out)
 
     def test_cte_allowed(self):
-        out = run("WITH a AS (SELECT e, AVG(d) g FROM t GROUP BY e) SELECT e FROM a ORDER BY g DESC LIMIT 1")
+        out = run("WITH a AS (SELECT region, AVG(change) g FROM t GROUP BY region) SELECT region FROM a ORDER BY g DESC LIMIT 1")
         self.assertIn("\nAfrica", out)
 
 
 class Sandbox(unittest.TestCase):
     def test_writes_denied(self):
-        for sql in ("DELETE FROM t", "UPDATE t SET b = 0", "INSERT INTO t (a) VALUES ('x')",
+        for sql in ("DELETE FROM t", "UPDATE t SET pop_2022 = 0", "INSERT INTO t (country) VALUES ('x')",
                     "DROP TABLE t", "CREATE TABLE x (y)", "CREATE TEMP VIEW v AS SELECT 1",
-                    "REPLACE INTO t (a) VALUES (1)"):
+                    "REPLACE INTO t (country) VALUES (1)"):
             fails(self, sql, "not authorized")
 
     def test_files_and_pragmas_denied(self):
@@ -149,7 +166,7 @@ class Sandbox(unittest.TestCase):
         fails(self, "UPDATE sqlite_master SET sql = ''")
 
     def test_syntax_error_reported(self):
-        fails(self, "SELEC a FROM t", "SQLite error")
+        fails(self, "SELEC country FROM t", "SQLite error")
         fails(self, "SELECT nope FROM t", "no such column")
         fails(self, "", "Empty SQL")
 
@@ -160,7 +177,7 @@ class Parsing(unittest.TestCase):
             self.assertIsNone(S.parse(raw, snapshot()), raw)
 
     def test_instructions_list_columns(self):
-        self.assertIn("Columns: row (sheet row number), a (Country), b (Pop 2022)",
+        self.assertIn("Columns: row (sheet row number), country (Country), pop_2022 (Pop 2022)",
                       S.table_note(context.Table(snapshot())))
         text = S.instructions(context.Table(snapshot()))
         example = text.split("as JSON:\n")[1].split("\n")[0]
@@ -204,8 +221,8 @@ class Placement(unittest.TestCase):
 
     def test_free_text_columns_not_listed(self):
         note = S.table_note(context.Table(self.snap()))
-        self.assertIn("b (Paid; values: 'No', 'Yes')", note)
-        self.assertIn("c (Notes)", note)
+        self.assertIn("paid (Paid; values: 'No', 'Yes')", note)
+        self.assertIn("notes (Notes)", note)
         self.assertNotIn("values: 'Ignore", note)
 
 
@@ -226,9 +243,9 @@ class Fallback(unittest.TestCase):
         snap = snapshot(rows)
         for n_ctx in (2048, 4096, 8192):
             msgs, max_tokens = prompts.build_messages(snap, "largest increase?", n_ctx, engine=S)
-            bad = '{"sql_needed": true, "sql": "SELECT a, c - b FROM t ORDER BY 2 DESC LIMIT 20"}'
+            bad = '{"sql_needed": true, "sql": "SELECT country, pop_2023 - pop_2022 FROM t ORDER BY 2 DESC LIMIT 20"}'
             msgs = prompts.retry_turn(msgs, bad, "SQLite error: no such column: zz")
-            result = prompts.fit_result(run("SELECT a, c - b FROM t ORDER BY 2 DESC LIMIT 20", snap))
+            result = prompts.fit_result(run("SELECT country, pop_2023 - pop_2022 FROM t ORDER BY 2 DESC LIMIT 20", snap))
             full = prompts.follow_up(msgs, bad, result)
             used = sum(context.estimate_tokens(m["content"]) for m in full)
             self.assertLess(used + max_tokens, n_ctx, n_ctx)

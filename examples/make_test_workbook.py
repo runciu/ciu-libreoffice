@@ -53,7 +53,7 @@ ORDERS = [
     (1020, "Harbour Foods", "West", "Tea", 14, 2.50, "5%"),
 ]
 
-# Reference SQL over the table CIU builds (columns a..h, plus row).
+# Reference SQL over the table CIU builds (columns named after the headers, plus row).
 CHECKS = [
     ("Ask", "Summarise", None,
      "Should mention 22 orders across 4 regions and 4 products, a Total row, and the missing or odd values."),
@@ -61,33 +61,33 @@ CHECKS = [
      "Should list: order 1007 twice; order 1015 twice (spacing and case differ); Units missing for 1004 (row 5); "
      "Region 'N/A' for 1010; Unit price '-' for 1018; Discount stored as text."),
     ("Ask", "Which region had the highest revenue?",
-     "SELECT c, SUM(h) AS revenue FROM t WHERE c <> 'N/A' GROUP BY c ORDER BY revenue DESC LIMIT 1", None),
+     "SELECT region, SUM(revenue) AS total FROM t WHERE region <> 'N/A' GROUP BY region ORDER BY total DESC LIMIT 1", None),
     ("Ask", "How many orders are in the North region?",
-     "SELECT COUNT(*) FROM t WHERE LOWER(c) = 'north'",
+     "SELECT COUNT(*) FROM t WHERE region = 'North'",
      "Counts the duplicated 1015 twice; ask 'how many distinct orders' for the other answer."),
     ("Ask", "What is the average unit price of coffee?",
-     "SELECT ROUND(AVG(f), 2) FROM t WHERE LOWER(d) = 'coffee'",
+     "SELECT ROUND(AVG(unit_price), 2) FROM t WHERE product = 'Coffee'",
      "The '-' price is a missing value, so 4 coffee orders count."),
     ("Ask", "Which customer bought the most units in total?",
-     "SELECT b, SUM(e) AS units FROM t GROUP BY LOWER(TRIM(b)) ORDER BY units DESC LIMIT 1", None),
+     "SELECT customer, SUM(units) AS total FROM t GROUP BY customer ORDER BY total DESC LIMIT 1", None),
     ("Propose change", "Add a column with revenue after discount", None,
      "Expect a formula like =H2*(1-G2) filled down column I. The preview shows calculated results: "
      "I3 should be 31.5 (35 less 10%). If it shows 34.965 the formula divided the percentage by 100 "
      "again: press Discard. Order 1018 has no revenue, so its cell shows an error, which is listed."),
     ("Propose change", "Remove duplicate orders (same Order ID) into a new sheet",
-     "SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY a ORDER BY row) AS n FROM t) WHERE n = 1",
+     "SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY row) AS n FROM t) WHERE n = 1",
      "The preview should list the second 1007 and the second 1015 as left out, and say the Total "
      "row is not copied."),
     ("Propose change", "Make a copy without the rows that have missing values, treating N/A as missing",
-     "SELECT * FROM t WHERE e IS NOT NULL AND f IS NOT NULL AND c <> 'N/A'",
+     "SELECT * FROM t WHERE units IS NOT NULL AND unit_price IS NOT NULL AND region <> 'N/A'",
      "Leaves out 1004 (no Units), 1010 (Region N/A) and 1018 (price '-'). Without 'treating N/A as "
      "missing' CIU may keep 1010, since N/A is text, not an empty cell."),
     ("Propose change", "Make a copy with missing Units filled with the average Units",
-     "SELECT ROUND(AVG(e), 2) FROM t",
+     "SELECT ROUND(AVG(units), 2) FROM t",
      "is the average, so order 1004 gets that many Units in the copy. Duplicates count towards the "
      "average; the Total row does not. No worked example in CIU's instructions covers this."),
     ("Propose change", "Make a new sheet with total revenue per region",
-     "SELECT c, SUM(h) AS revenue FROM t GROUP BY c ORDER BY revenue DESC",
+     "SELECT region, SUM(revenue) AS total FROM t GROUP BY region ORDER BY total DESC",
      "One row per region, including N/A."),
 ]
 

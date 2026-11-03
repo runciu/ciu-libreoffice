@@ -24,7 +24,7 @@ MESSY = [
     ["Eve", "-", 2.0],
 ]
 
-DEDUPE = ("SELECT a, b, c FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(a)) "
+DEDUPE = ("SELECT name, city, sales FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY name "
           "ORDER BY row) AS n FROM t) WHERE n = 1 ORDER BY row")
 
 
@@ -40,14 +40,15 @@ class RunToSheet(unittest.TestCase):
         self.assertEqual(r.source_rows, 7)
 
     def test_drop_missing_including_markers(self):
-        sql = ("SELECT a, b, c FROM t WHERE b IS NOT NULL AND c IS NOT NULL "
-               "AND b NOT IN ('N/A', '-') ORDER BY row")
+        sql = ("SELECT name, city, sales FROM t WHERE city IS NOT NULL AND sales IS NOT NULL "
+               "AND city NOT IN ('N/A', '-') ORDER BY row")
         # City is a text column, so its markers stay text and are matched by value.
         r = S.run_to_sheet(sql, table())
-        self.assertEqual([row[0] for row in r.rows], ["Ann", " ann ", "Bob"])
+        self.assertEqual([row[0] for row in r.rows], ["Ann", "Ann", "Bob"])
+        self.assertIn("Merged spellings in name: ' ann ' as 'Ann'.", r.notes)
 
     def test_values_are_calc_ready(self):
-        r = S.run_to_sheet("SELECT a, c, COUNT(*) AS n FROM t GROUP BY a ORDER BY row", table())
+        r = S.run_to_sheet("SELECT name, sales, COUNT(*) AS n FROM t GROUP BY name ORDER BY row", table())
         values = r.values()
         self.assertEqual(values[0], ("Name", "Sales", "n"))
         cat = [v for v in values if v[0] == "Cat"][0]
@@ -55,7 +56,7 @@ class RunToSheet(unittest.TestCase):
         self.assertTrue(all(isinstance(v, (str, float)) for row in values for v in row))
 
     def test_totals_left_out_of_copies(self):
-        r = S.run_to_sheet("SELECT a FROM t ORDER BY row", context.Table(with_world()))
+        r = S.run_to_sheet("SELECT country FROM t ORDER BY row", context.Table(with_world()))
         self.assertEqual(r.rows[-1][0], "Tuvalu")
         self.assertEqual(r.totals, ["row 11: World"])
         self.assertEqual(r.left_out, [])
@@ -63,7 +64,7 @@ class RunToSheet(unittest.TestCase):
                       S.sheet_instructions(context.Table(with_world())))
 
     def test_percent_text_becomes_number(self):
-        r = S.run_to_sheet("SELECT a, d FROM t WHERE a = 'Chad'", table(ROWS))
+        r = S.run_to_sheet("SELECT country, change FROM t WHERE country = 'Chad'", table(ROWS))
         self.assertEqual(r.values()[1], ("Chad", 0.0468))
         self.assertEqual(r.kinds, [None, "percent"])
 
@@ -88,9 +89,12 @@ class RunToSheet(unittest.TestCase):
 
     def test_examples_in_instructions_run(self):
         text = S.sheet_instructions(table())
+        ran = 0
         for line in text.splitlines():
-            if "SELECT a, b, c" in line:
+            if "SELECT name, city, sales" in line:
+                ran += 1
                 S.run_to_sheet(line.split(": ", 1)[1], table())
+        self.assertEqual(ran, 2)
 
 
 class Plans(unittest.TestCase):
@@ -136,9 +140,9 @@ class Prompting(unittest.TestCase):
         self.assertIn("sql_to_sheet", system)
         self.assertLess(system.index("sql_to_sheet"), system.index("Rules:"))
         user = msgs[1]["content"]
-        self.assertIn("a (Name; values: ", user)
-        self.assertIn("c (Sales)", user)
-        self.assertIn("First rows of t, as stored: (row=2, a='Ann', b='Leeds', c=10)", user)
+        self.assertIn("name (Name; values: ", user)
+        self.assertIn("sales (Sales)", user)
+        self.assertIn("First rows of t, as stored: (row=2, name='Ann', city='Leeds', sales=10)", user)
         self.assertNotIn("Leeds", system)
 
     def test_fits_window(self):

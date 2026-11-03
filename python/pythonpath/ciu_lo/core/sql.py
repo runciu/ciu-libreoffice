@@ -12,7 +12,7 @@ import time
 
 from .context import Table, fmt, is_empty
 from .query import QueryError
-from .values import is_iso_date, iso_to_serial, to_number
+from .values import format_number, is_iso_date, iso_to_serial, to_number
 
 try:
     import sqlite3
@@ -41,18 +41,49 @@ SCHEMA = {
     "required": ["sql_needed"],
 }
 
-_KEYWORDS = {"as", "by", "do", "if", "in", "is", "no", "of", "on", "or", "to"}
+# Names that would clash with SQL: they get a trailing underscore.
+_KEYWORDS = {
+    "abort", "action", "add", "after", "all", "alter", "and", "as", "asc", "attach",
+    "before", "begin", "between", "by", "case", "cast", "check", "collate", "column",
+    "commit", "conflict", "constraint", "create", "cross", "current", "date", "default",
+    "delete", "desc", "distinct", "do", "drop", "each", "else", "end", "escape", "except",
+    "exists", "filter", "first", "for", "foreign", "from", "full", "glob", "group", "having",
+    "if", "in", "index", "inner", "insert", "intersect", "into", "is", "join", "key", "last",
+    "left", "like", "limit", "match", "natural", "no", "not", "null", "of", "offset", "on",
+    "or", "order", "outer", "over", "partition", "primary", "range", "references", "regexp",
+    "replace", "right", "row", "rows", "select", "set", "t", "table", "then", "time", "to",
+    "union", "unique", "update", "using", "values", "view", "when", "where", "window", "with"}
+MAX_NAME = 30
 _DENIED_FUNCTIONS = {"load_extension", "readfile", "writefile", "edit",
                      "fts3_tokenizer", "zipfile", "sqlar_compress", "sqlar_uncompress"}
 
 
 def column_names(table):
-    """SQL names for the selection's columns: the sheet letters, lower case."""
+    """SQL names for the selection's columns, from their headers: "Unit price"
+    becomes unit_price. A meaningful name is far harder for a small model to
+    confuse than a letter (it averaged column g for VAT when VAT was h).
+    Columns without a usable header keep their sheet letter."""
+    import re
     from .context import col_letter
-    names = []
+    names, used = [], set()
+    header = table.snapshot.rows[0] if table.header and table.snapshot.rows else []
     for c in range(table.width):
-        name = col_letter(table.snapshot.start_col + c).lower()
-        names.append(name + "_" if name in _KEYWORDS else name)
+        letter = col_letter(table.snapshot.start_col + c).lower()
+        raw = header[c] if c < len(header) else ""
+        name = re.sub(r"[^0-9a-z]+", "_", fmt(raw).strip().lower()).strip("_")[:MAX_NAME].strip("_") \
+            if isinstance(raw, str) else ""
+        if not name or not re.search(r"[a-z]", name):
+            name = letter
+        if name[0].isdigit():
+            name = "c_" + name
+        if name in _KEYWORDS:
+            name += "_"
+        base, n = name, 2
+        while name in used:
+            name = "%s_%d" % (base, n)
+            n += 1
+        used.add(name)
+        names.append(name)
     return names
 
 
@@ -78,9 +109,7 @@ def describe_columns(table):
             # Small category columns: listing the values stops the model
             # guessing spellings (and shows 'Y' beside 'Yes').
             listed = ", ".join("'%s'" % shown for _, shown, _ in p.groups)
-            varies = any(len(spellings) > 1 for _, _, spellings in p.groups)
-            bits.append("values: %s%s%s" % (listed, " (any case)" if varies else "",
-                                             ", some empty" if p.missing else ""))
+            bits.append("values: %s%s" % (listed, ", some empty" if p.missing else ""))
         cols.append("%s (%s)" % (name, "; ".join(bits)) if bits else name)
     return ", ".join(cols)
 
@@ -105,6 +134,8 @@ def value_rules(table):
     """How values appear in t, for both instructions."""
     rules = ["t holds only data rows: no header row and no total rows. Never compare "
              "a column with its own header name.",
+             "Spellings that differ only in case or spaces are merged into the most common "
+             "one ('no' is stored as 'No'), so compare with the values listed for t.",
              "Empty cells are NULL; = and != are never true for NULL, so use IS NULL, "
              "IS NOT NULL or COALESCE(x, '').",
              "Do all arithmetic in SQL (SUM, COUNT, AVG, ROUND); never add up results yourself.",
@@ -142,13 +173,23 @@ def sheet_instructions(table):
         "column statistics. Copies leave total rows out.\n  %s\n"
         "  Keep the original column order and ORDER BY row unless asked otherwise. "
         "Do not select row unless asked.\n"
-        "  Remove duplicates of a, keeping the first: SELECT a, b, c FROM (SELECT *, "
-        "ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(a)) ORDER BY row) AS n FROM t) "
+        "  Remove duplicates of %(key)s, keeping the first: SELECT %(cols)s FROM (SELECT *, "
+        "ROW_NUMBER() OVER (PARTITION BY %(key)s ORDER BY row) AS n FROM t) "
         "WHERE n = 1 ORDER BY row\n"
-        "  Drop rows with a missing value: SELECT a, b, c FROM t WHERE b IS NOT NULL "
-        "AND c IS NOT NULL ORDER BY row"
-        % "\n  ".join(value_rules(table))
-    )
+        "  Drop rows with a missing value: SELECT %(cols)s FROM t WHERE %(where)s ORDER BY row"
+    ).replace("%s\n", "\n  ".join(value_rules(table)).replace("%", "%%") + "\n", 1) \
+        % _example_names(table)
+
+
+def _example_names(table):
+    """Real column names for the worked examples, so the model adapts a
+    pattern about its own table rather than copying placeholder letters."""
+    names = column_names(table)
+    key = names[table.label_col if table.label_col is not None else 0]
+    cols = ", ".join(names) if len(names) <= 8 else ", ".join(names[:3]) + ", ..."
+    checked = [n for n in names[1:3]] or names[:1]
+    return {"key": key, "cols": cols,
+            "where": " AND ".join("%s IS NOT NULL" % n for n in checked)}
 
 
 def instructions(table):
@@ -210,6 +251,7 @@ def execute(sql, table, max_rows, time_limit):
     """Run one read-only statement. Returns (column names, rows, notes),
     where notes say which values could not be read as numbers."""
     conn, notes = _load(table)
+    notes = _relevant(notes, sql)
     try:
         deadline = time.monotonic() + time_limit
         conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 2000)
@@ -324,9 +366,7 @@ def format_cell(v):
     if v is None:
         return "-"
     if isinstance(v, float):
-        if math.isfinite(v) and v == int(v) and abs(v) < 1e15:
-            return str(int(v))
-        return "%.6g" % v
+        return format_number(v)
     s = str(v)
     return s if len(s) <= 40 else s[:39] + "~"
 
@@ -356,6 +396,16 @@ def _load(table):
     conn.execute("CREATE TABLE t (row INTEGER, %s)" % ", ".join('"%s"' % n for n in names))
     numeric = numeric_columns(table)
     logical = {c for c in range(table.width) if table.column_kind(c) == "logical"}
+    # Text spelled differently only by case or spaces is stored in its most
+    # common spelling, so paid = 'No' also finds 'no' and ' No '.
+    spelling = {}
+    for c in range(table.width):
+        if c in numeric or c in logical or c >= len(table.profiles):
+            continue
+        for _, shown, spellings in table.profiles[c].groups:
+            if len(spellings) > 1:
+                spelling[(c, shown.lower())] = shown
+    merged = {}
     dropped = {}
     data = []
     for i, row in enumerate(table.body):
@@ -379,18 +429,38 @@ def _load(table):
                 values.append(None)
                 dropped.setdefault(c, []).append(fmt(v))
             else:
-                values.append(fmt(v))
+                text = fmt(v)
+                common = spelling.get((c, text.strip().lower()))
+                if common is not None and text != common:
+                    merged.setdefault((c, text, common), 0)
+                    merged[(c, text, common)] += 1
+                    text = common
+                values.append(text)
         data.append(values)
     conn.executemany("INSERT INTO t VALUES (%s)" % ", ".join("?" * (table.width + 1)), data)
     conn.commit()
     notes = []
+    for c in sorted({c for c, _, _ in merged}):
+        changes = sorted((old, new, n) for (k, old, new), n in merged.items() if k == c)
+        notes.append((names[c], "Merged spellings in %s: %s." % (names[c], ", ".join(
+            "'%s' as '%s'%s" % (old, new, " (%d cells)" % n if n > 1 else "")
+            for old, new, n in changes[:6]))))
     for c in sorted(dropped):
         vals = dropped[c]
         shown = ", ".join("'%s'" % v for v in sorted(set(vals))[:4])
-        notes.append("Column %s: %d value%s could not be read as a number and %s treated "
-                     "as missing (%s)." % (names[c], len(vals), "" if len(vals) == 1 else "s",
-                                           "was" if len(vals) == 1 else "were", shown))
+        notes.append((names[c], "Column %s: %d value%s could not be read as a number and %s "
+                      "treated as missing (%s)." % (names[c], len(vals), "" if len(vals) == 1 else "s",
+                                                    "was" if len(vals) == 1 else "were", shown)))
     return conn, notes
+
+
+def _relevant(notes, sql):
+    """Notes about the columns a query uses; a note about an unused column
+    is noise the model may try to explain."""
+    import re
+    words = set(re.findall(r"[a-z_][a-z0-9_]*", sql.lower()))
+    every = re.search(r"(select|,)\s*\*|\.\*", sql.lower())
+    return [text for name, text in notes if every or name in words]
 
 
 _ALLOWED = None
