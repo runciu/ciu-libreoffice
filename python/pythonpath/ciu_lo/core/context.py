@@ -15,7 +15,7 @@ class Snapshot(object):
 
     def __init__(self, doc_title, sheet, start_col, start_row, rows,
                  formulas=None, total_rows=None, total_cols=None,
-                 scope_note=None, hints=None, kinds=None, typed_dates=None):
+                 scope_note=None, hints=None, kinds=None, typed_dates=None, above=None):
         self.doc_title = doc_title
         self.sheet = sheet
         self.start_col = start_col
@@ -30,6 +30,7 @@ class Snapshot(object):
         # "percent", "logical" or "currency" (set by the Calc reader).
         self.kinds = kinds or {}
         self.typed_dates = typed_dates or {}  # column -> row indexes typed as text
+        self.above = above or []    # (cell ref, shown text) of title cells above the table
 
     @property
     def n_read(self):
@@ -84,6 +85,27 @@ def detect_header(rows):
             return True
     body_vals = set(str(v) for r in body for v in r if not is_empty(v))
     return not any(str(v) in body_vals for v in non_empty) and len(non_empty) == len(first)
+
+
+def table_start(rows, look=10):
+    """Number of title rows above the header, such as a report title and an
+    "As of" date: rows clearly shorter than the first row of text labels that
+    heads a table. 0 when the first row already starts the table."""
+    width = max((len(r) for r in rows), default=0)
+    if width < 3:
+        return 0
+
+    def filled(r):
+        return [v for v in r if not is_empty(v)]
+
+    for k in range(1, min(look, len(rows) - 2) + 1):
+        cells = filled(rows[k])
+        if len(cells) < max(2, math.ceil(0.6 * width)) or any(is_num(v) for v in cells):
+            continue
+        if any(len(filled(r)) >= 0.75 * len(cells) for r in rows[:k]):
+            return 0
+        return k if detect_header(rows[k:]) else 0
+    return 0
 
 
 _PERCENT = re.compile(r"^[+\-\u2212]?\d+(?:[.,]\d+)?\s*%$")
@@ -242,17 +264,24 @@ def _total_rows(body, profiles, label_col):
         texts = [v for v in row if isinstance(v, str) and v.strip()]
         if len(texts) == 1 and _is_total_label(texts[0]):
             found.add(i)
-    for p in profiles:
-        if len(p.ranked) < 3:
-            continue
+    # A row is a sum row when, in at least half of the columns where it has a
+    # number, that number is the sum of all the others. One matching column
+    # is not enough: in a short column 5 = 3 + 2 happens by chance.
+    summable = [p for p in profiles if len(p.ranked) >= 4]
+    votes = {}
+    for p in summable:
         i = p.ranked[-1]
         top = to_number(body[i][p.col_index])
         # Compare with the parsed sum and with Calc's own SUM, which skips
         # numbers stored as text.
-        for total in (p.sum, p.real_sum):
-            rest = total - top
-            if rest > 0 and abs(top - rest) <= TOTAL_TOLERANCE * rest:
-                found.add(i)
+        if any(total - top > 0 and abs(2 * top - total) <= TOTAL_TOLERANCE * (total - top)
+               for total in (p.sum, p.real_sum)):
+            votes[i] = votes.get(i, 0) + 1
+    for i, n in votes.items():
+        has = sum(1 for p in summable if p.col_index < len(body[i])
+                  and to_number(body[i][p.col_index]) is not None)
+        if 2 * n >= has:
+            found.add(i)
     return found
 
 
@@ -531,6 +560,9 @@ def render(snapshot, budget=2000, max_formulas=25, measure=estimate_tokens):
             snapshot.n_read, snapshot.total_rows))
     lines.append("Header row: %s" % (
         "yes (row %d)" % (snapshot.start_row + 1) if header else "not detected"))
+    if snapshot.above:
+        lines.append("Above the table: %s" % ", ".join(
+            "%s %s" % (ref, _quote(text[:60])) for ref, text in snapshot.above[:8]))
     for h in snapshot.hints:
         lines.append(h)
     table = Table(snapshot)

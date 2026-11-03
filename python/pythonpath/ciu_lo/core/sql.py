@@ -250,6 +250,7 @@ class SqlQuery(object):
 def execute(sql, table, max_rows, time_limit):
     """Run one read-only statement. Returns (column names, rows, notes),
     where notes say which values could not be read as numbers."""
+    _check_empty_text(sql, table)
     conn, notes = _load(table)
     notes = _relevant(notes, sql)
     try:
@@ -452,6 +453,32 @@ def _load(table):
                       "treated as missing (%s)." % (names[c], len(vals), "" if len(vals) == 1 else "s",
                                                     "was" if len(vals) == 1 else "were", shown)))
     return conn, notes
+
+
+def _check_empty_text(sql, table):
+    """Empty cells are NULL, so x = '' and x IN (..., '') never match them and
+    the answer silently leaves blanks out. Such a query is refused with the
+    fix, so the model gets a chance to correct it."""
+    import re
+    text = re.sub(r"(coalesce|ifnull)\s*\((?:[^()]|\([^()]*\))*?,\s*''\s*\)", "x",
+                  sql, flags=re.I)
+    compares = re.search(r"(?<![<>!])==?\s*''|''\s*==?(?!=)", text) or any(
+        "''" in m.group(2) for m in re.finditer(r"(\bnot\s+)?\bin\s*\(([^()]*)\)", text, re.I)
+        if not m.group(1))
+    if not compares:
+        return
+    words = set(re.findall(r"[a-z_][a-z0-9_]*", text.lower()))
+    numeric = numeric_columns(table)
+    hit = [(name, table.profiles[c].missing) for c, name in enumerate(column_names(table))
+           if name in words and c not in numeric and c < len(table.profiles)
+           and table.profiles[c].missing]
+    if hit:
+        name = hit[0][0]
+        raise QueryError(
+            "Empty cells are NULL, so '' never matches them (%s). Use %s IS NULL, "
+            "or COALESCE(%s, '') = ''." % (", ".join(
+                "%s has %d empty cell%s" % (n, k, "" if k == 1 else "s") for n, k in hit),
+                name, name))
 
 
 def _relevant(notes, sql):

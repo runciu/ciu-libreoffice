@@ -131,6 +131,23 @@ class Results(unittest.TestCase):
         self.assertIn("\nAfrica", out)
 
 
+class EmptyText(unittest.TestCase):
+    ROWS = [["Invoice", "Paid", "Amount"], ["I1", "No", 10.0], ["I2", "", 5.0],
+            ["I3", "Yes", 7.0], ["I4", "no", 3.0]]
+
+    def test_blank_compared_with_empty_string_is_refused(self):
+        for sql in ("SELECT SUM(amount) FROM t WHERE paid = ''",
+                    "SELECT SUM(CASE WHEN LOWER(paid) IN ('no', '') THEN amount END) FROM t"):
+            fails(self, sql, "Use paid IS NULL", snapshot(self.ROWS))
+
+    def test_safe_forms_run(self):
+        for sql, want in [("SELECT SUM(amount) FROM t WHERE COALESCE(paid, '') IN ('No', '')", "18"),
+                          ("SELECT SUM(amount) FROM t WHERE paid IS NULL OR paid = 'No'", "18"),
+                          ("SELECT SUM(amount) FROM t WHERE paid <> ''", "20"),
+                          ("SELECT COUNT(*) FROM t WHERE invoice = ''", "0")]:
+            self.assertEqual(run(sql, snapshot(self.ROWS)).splitlines()[-1], want, sql)
+
+
 class Sandbox(unittest.TestCase):
     def test_writes_denied(self):
         for sql in ("DELETE FROM t", "UPDATE t SET pop_2022 = 0", "INSERT INTO t (country) VALUES ('x')",

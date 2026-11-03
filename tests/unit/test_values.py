@@ -57,6 +57,35 @@ class Display(unittest.TestCase):
             self.assertEqual(V.format_number(v), want, v)
 
 
+class SumRows(unittest.TestCase):
+    def test_chance_sum_in_one_column_is_not_a_total(self):
+        rows = [["Region", "Units", "Price", "Total"], ["North", 3.0, 2.5, 7.5],
+                ["South", 5.0, 4.0, 20.0], ["North", "", 1.0, 0.0], ["East", 2.0, 9.5, 19.0]]
+        self.assertEqual(context.Table(context.Snapshot("d", "S", 0, 0, rows)).totals, set())
+
+    def test_unlabelled_sum_row_found(self):
+        rows = [["Item", "Q1", "Q2"], ["a", 1.0, 4.0], ["b", 2.0, 5.0], ["c", 3.0, 6.0],
+                ["", 6.0, 15.0]]
+        self.assertEqual(context.Table(context.Snapshot("d", "S", 0, 0, rows)).totals, {3})
+
+
+class TitleRows(unittest.TestCase):
+    HDR = ["Invoice", "Account", "Client", "Due", "Amount"]
+    ROW = ["I1", "00123", "Acme", 46300.0, 100.0]
+
+    def test_title_and_blank_rows_skipped(self):
+        title = ["Invoices Q4 2026", "", "As of", 46356.0, ""]
+        self.assertEqual(context.table_start([title, [""] * 5, self.HDR, self.ROW, self.ROW]), 2)
+        self.assertEqual(context.table_start([["Report"], self.HDR, self.ROW, self.ROW]), 1)
+
+    def test_tables_that_start_at_once(self):
+        self.assertEqual(context.table_start([self.HDR, self.ROW, self.ROW]), 0)
+        self.assertEqual(context.table_start([self.ROW, self.HDR, self.ROW, self.ROW]), 0)
+        self.assertEqual(context.table_start([["Name", "Notes", "City"], ["a", "", ""],
+                                              ["b", "c", "d"], ["e", "f", "g"]]), 0)
+        self.assertEqual(context.table_start([["x", ""], ["A", "B"], [1.0, 2.0]]), 0)
+
+
 class ApplyKinds(unittest.TestCase):
     def test_reader_kinds_convert_values(self):
         rows = [["Due", "Remote", "When"], [46297.0, 1.0, 46297.5], ["15/11/2026", 0.0, ""],

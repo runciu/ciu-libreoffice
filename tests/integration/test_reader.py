@@ -75,6 +75,21 @@ class Reader(unittest.TestCase):
         self.assertIn("E3: =C3*D3", out)
         self.assertIn("\n3\tNorth\t3\t2.5\t7.5", out)
 
+    def test_title_rows_above_the_header(self):
+        self.sheet.getCellRangeByName("B1").setString("Sales Q4")
+        self.sheet.getCellRangeByName("E1").setFormula("=DATE(2026;11;30)")
+        self.sheet.getCellRangeByName("E1").NumberFormat = 37
+        self.select("A1:XFD1048576")
+        s = reader.read_selection(self.doc, self.ctrl)
+        self.assertEqual(s.range_ref(), "A2:E6")
+        self.assertEqual(s.rows[0][1], "Region")
+        self.assertIn("table starts below 1 title row", s.scope_note)
+        self.assertEqual([ref for ref, _ in s.above], ["B1", "E1"])
+        self.assertEqual(s.above[0][1], "Sales Q4")
+        self.assertEqual(len(reader.read_full(self.doc, s).rows), 5)
+        self.assertIn("Above the table: B1 'Sales Q4', E1 '",
+                      context.render(s))
+
     def test_empty_area_rejected(self):
         self.select("H20:J30")
         with self.assertRaises(reader.SelectionError):

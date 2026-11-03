@@ -53,7 +53,7 @@ CIU reads values the way Calc shows them, so a value means the same thing in a f
 | `no`, `No`, ` No ` | `No` in SQL (the most common spelling) | the result says which spellings were merged |
 | `-`, `N/A`, `TBC` in a number column | missing | the answer says which values were treated as missing |
 
-Total and subtotal rows are left out of statistics, queries and copies, and wholly empty rows are skipped. If you click one cell and more data continues below a blank row, the selection line says so.
+Total and subtotal rows are left out of statistics, queries and copies, and wholly empty rows are skipped. If you click one cell and more data continues below a blank row, the selection line says so. Title rows above the header (a report name, an "As of" date) are not treated as data; their text is passed along as context, so "overdue on the As of date" still works. A comparison such as `paid = ''` on a column with empty cells is refused with the fix (`paid IS NULL`), because empty cells are NULL in SQL and would silently be left out.
 
 ## Requirements
 

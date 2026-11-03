@@ -1,6 +1,6 @@
 """Reads the current Calc selection into a Snapshot. Main thread only."""
 
-from ..core.context import Snapshot
+from ..core.context import Snapshot, table_start
 from ..core.values import apply_kinds
 
 MAX_CELLS = 6000
@@ -73,6 +73,15 @@ def read_selection(model, controller=None):
         addr.EndColumn, addr.StartRow + read_rows - 1)
     rows = [list(r) for r in block.getDataArray()]
     formulas = [list(r) for r in block.getFormulaArray()]
+    above = []
+    skip = table_start(rows)
+    if skip:
+        above = _above(sheet, addr, skip)
+        rows, formulas = rows[skip:], formulas[skip:]
+        addr.StartRow += skip
+        total_rows -= skip
+        note = "table starts below %d title row%s" % (skip, "" if skip == 1 else "s")
+        scope_note = "%s; %s" % (scope_note, note) if scope_note else note
     rows, kinds, typed = apply_kinds(rows, display_kinds(model, sheet, addr.StartColumn,
                                                          addr.StartRow, rows))
 
@@ -89,7 +98,19 @@ def read_selection(model, controller=None):
         hints=_free_space_hints(sheet, addr),
         kinds=kinds,
         typed_dates=typed,
+        above=above,
     )
+
+
+def _above(sheet, addr, n):
+    """Title cells as Calc shows them, so a date reads '30 Nov 2026'."""
+    out = []
+    for r in range(addr.StartRow, addr.StartRow + n):
+        for c in range(addr.StartColumn, addr.EndColumn + 1):
+            text = sheet.getCellByPosition(c, r).getString().strip()
+            if text:
+                out.append((_ref(c, r), text))
+    return out
 
 
 FULL_MAX_CELLS = 500000
@@ -122,6 +143,8 @@ def read_full(model, snapshot, max_cells=FULL_MAX_CELLS):
         total_cols=snapshot.total_cols,
         kinds=kinds,
         typed_dates=typed,
+        scope_note=snapshot.scope_note,
+        above=snapshot.above,
     )
 
 
