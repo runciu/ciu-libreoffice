@@ -99,6 +99,17 @@ class Extension(unittest.TestCase):
         self.assertTrue(state["answer"].endswith("[stopped]"))
         self.assertLess(len(state["answer"]), len("word " * 300))
 
+    def test_4b_cut_off_and_looping_answers_are_labelled(self):
+        mock_ciu.STATE.finish_reason = "length"
+        OFFICE.hook("press:quick:0")
+        state = wait_done()
+        self.assertTrue(state["answer"].endswith("[answer cut off at the length limit]"))
+        mock_ciu.STATE.__init__()
+        mock_ciu.STATE.reply = ("Row 4 is Acme Ltd and row 7 is Acme Ltd as well. " * 6)
+        OFFICE.hook("press:quick:1")
+        state = wait_done()
+        self.assertIn("[stopped: the answer was repeating itself", state["answer"])
+
     def test_5_model_not_loaded(self):
         mock_ciu.STATE.state = "stopped"
         OFFICE.hook("press:quick:2")

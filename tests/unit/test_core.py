@@ -207,6 +207,30 @@ class Think(unittest.TestCase):
         self.assertEqual(self.run_chunks("ok<think>never closed", 4), "ok")
 
 
+LOOPING = (
+    "Inconsistent text:\n- Column C (Client): row 4 (cell C4) \"Acme Ltd\" vs row 7. "
+    "Let me re-check the data provided. Row 4: \"Acme Ltd\", Row 7: \"Acme Ltd\", Row 15: \"Acme Ltd\". "
+    "They look consistent. Wait, row 4 is \"Acme Ltd\", row 7 is \"Acme Ltd\", row 15 is \"Acme Ltd\". "
+    "Let me check the data again. Row 4: \"Acme Ltd\", Row 7: \"Acme Ltd\", Row 15: \"Acme Ltd\". "
+    "They are the same. Row 4: \"Acme Ltd\", Row 7: \"Acme Ltd\", Row 15: \"Acme Ltd\". ")
+
+
+class Repetition(unittest.TestCase):
+    def test_real_loop_detected(self):
+        from ciu_lo.core.ciu_client import RepetitionGuard
+        g = RepetitionGuard()
+        for i in range(0, len(LOOPING), 9):
+            g.feed(LOOPING[i:i + 9])
+        self.assertTrue(g.looping)
+
+    def test_normal_lists_are_fine(self):
+        from ciu_lo.core.ciu_client import RepetitionGuard
+        g = RepetitionGuard()
+        g.feed("".join("- Column J (Notes) is empty in row %d.\n" % r for r in range(4, 30)))
+        g.feed("Tea | 2\nTea | 2\nTea | 2\nTea | 2\n")   # short lines may repeat
+        self.assertFalse(g.looping)
+
+
 class Client(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -242,6 +266,16 @@ class Client(unittest.TestCase):
         self.assertTrue(req["stream"])
         self.assertEqual(req["max_tokens"], 50)
         self.assertFalse(req["chat_template_kwargs"]["enable_thinking"])
+
+    def test_finish_reasons(self):
+        mock_ciu.STATE.finish_reason = "length"
+        self.client.chat_stream([], lambda t: None)
+        self.assertEqual(self.client.last_finish, "length")
+        mock_ciu.STATE.reply = LOOPING * 3
+        mock_ciu.STATE.finish_reason = "stop"
+        text = self.client.chat_stream([], lambda t: None)
+        self.assertEqual(self.client.last_finish, "repetition")
+        self.assertLess(len(text), len(LOOPING) * 3)
 
     def test_not_loaded_message(self):
         mock_ciu.STATE.state = "stopped"

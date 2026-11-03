@@ -50,6 +50,7 @@ class Status(object):
 class CIUClient(object):
     def __init__(self, base_url=None):
         self.base = (base_url or os.environ.get("CIU_BASE_URL") or DEFAULT_BASE).rstrip("/")
+        self.last_finish = None  # "stop", "length" or "repetition" after chat_stream
 
     def status(self, timeout=2.0):
         try:
@@ -94,10 +95,15 @@ class CIUClient(object):
             raise CIUError("Could not reach CIU at %s (%s)." % (self.base, e))
 
         thinker = ThinkFilter()
+        guard = RepetitionGuard()
         parts = []
+        self.last_finish = None
         try:
             for raw in resp:
                 if should_stop():
+                    break
+                if guard.looping:
+                    self.last_finish = "repetition"
                     break
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("data:"):
@@ -118,6 +124,9 @@ class CIUClient(object):
                     if text:
                         parts.append(text)
                         on_delta(text)
+                        guard.feed(text)
+                    if choice.get("finish_reason"):
+                        self.last_finish = choice["finish_reason"]
         except socket.timeout:
             raise CIUError("CIU stopped responding (timed out).")
         finally:
@@ -183,6 +192,35 @@ def _http_error(http_error):
     if isinstance(err, dict):
         return CIUError(err.get("message") or json.dumps(err), err.get("type"))
     return CIUError(str(err))
+
+
+class RepetitionGuard(object):
+    """Notices when an answer starts going round in circles: the same
+    sentence (30+ characters) produced three times. Small local models do
+    this when they keep re-checking something they cannot resolve; without a
+    guard they run on to the length limit."""
+
+    MIN_LEN = 30
+    TIMES = 3
+
+    def __init__(self):
+        self.text = ""
+        self.counts = {}
+        self.looping = False
+
+    def feed(self, piece):
+        self.text += piece
+        while True:
+            cut = min((i for i in (self.text.find(c) for c in ".!?\n") if i >= 0), default=-1)
+            if cut < 0:
+                return
+            sentence, self.text = self.text[:cut + 1], self.text[cut + 1:]
+            key = " ".join(sentence.lower().split())
+            if len(key) < self.MIN_LEN:
+                continue
+            self.counts[key] = self.counts.get(key, 0) + 1
+            if self.counts[key] >= self.TIMES:
+                self.looping = True
 
 
 class ThinkFilter(object):

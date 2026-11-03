@@ -16,6 +16,7 @@ class MockState(object):
         self.delay = 0.0
         self.http_error = None
         self.max_prompt_chars = None
+        self.finish_reason = "stop"
         self.plan_reply = '{"summary": "nothing", "operations": []}'
         self.plan_replies = []  # used in order before plan_reply
         self.reject_response_format = False
@@ -69,7 +70,9 @@ class Handler(BaseHTTPRequestHandler):
         text = STATE.reply
         try:
             for i in range(0, len(text), STATE.chunk):
-                ev = {"choices": [{"delta": {"content": text[i:i + STATE.chunk]}}]}
+                last = i + STATE.chunk >= len(text)
+                ev = {"choices": [{"delta": {"content": text[i:i + STATE.chunk]},
+                                   "finish_reason": STATE.finish_reason if last else None}]}
                 self.wfile.write(("data: %s\n\n" % json.dumps(ev)).encode("utf-8"))
                 self.wfile.flush()
                 if STATE.delay:

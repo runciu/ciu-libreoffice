@@ -264,6 +264,12 @@ class AssistantDialog(object):
                     snap, messages, max_tokens, engine))
             if self.stop_event.is_set():
                 self.ui.post(lambda: self._append_answer("\n[stopped]"))
+            elif self.client.last_finish == "length":
+                self.ui.post(lambda: self._append_answer(
+                    "\n[answer cut off at the length limit]"))
+            elif self.client.last_finish == "repetition":
+                self.ui.post(lambda: self._append_answer(
+                    "\n[stopped: the answer was repeating itself; try a narrower question]"))
         except _Reroute:
             # A change typed into Ask: run Propose change instead of refusing.
             self._work_plan(snap, question)
