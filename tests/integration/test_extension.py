@@ -170,8 +170,9 @@ class Extension(unittest.TestCase):
         self.assertTrue(state["answer"].endswith("Total is =SUM(B2:B4)."))
         router, final = mock_ciu.STATE.requests
         self.assertIn("sql_needed", json.dumps(router["response_format"]))
-        self.assertIn("The selection is the table t with columns: row (sheet row number), "
-                      "a (Item), b (Cost)", router["messages"][0]["content"])
+        self.assertIn("Table t for SQL. Columns: row (sheet row number), a (Item; values: ",
+                      router["messages"][1]["content"])
+        self.assertNotIn("Milk", router["messages"][0]["content"])
         self.assertEqual(final["messages"][:2], router["messages"])
         last = final["messages"][-1]["content"]
         self.assertIn("Query result, computed exactly:", last)
