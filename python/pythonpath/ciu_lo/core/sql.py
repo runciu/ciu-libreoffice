@@ -57,7 +57,11 @@ def column_names(table):
 
 
 _KIND_NOTES = {"date": "date", "datetime": "date and time", "time": "time",
-               "percent": "fraction shown as %"}
+               "percent": "fraction shown as %", "logical": "TRUE/FALSE stored as 1/0"}
+
+
+MAX_LISTED_VALUES = 8
+MAX_LISTED_LENGTH = 24   # longer values are free text, never listed
 
 
 def describe_columns(table):
@@ -67,22 +71,62 @@ def describe_columns(table):
         label = full.split(" (", 1)[1][:-1] if " (" in full else ""
         note = _KIND_NOTES.get(table.column_kind(c))
         bits = [b for b in (label, note) if b]
-        cols.append("%s (%s)" % (name, ", ".join(bits)) if bits else name)
+        p = table.profiles[c] if c < len(table.profiles) else None
+        if p is not None and p.kind == "text" and 1 < p.unique <= MAX_LISTED_VALUES \
+                and p.unique < p.count and table.column_kind(c) != "logical" \
+                and all(len(shown) <= MAX_LISTED_LENGTH for _, shown, _ in p.groups):
+            # Small category columns: listing the values stops the model
+            # guessing spellings (and shows 'Y' beside 'Yes').
+            listed = ", ".join("'%s'" % shown for _, shown, _ in p.groups)
+            varies = any(len(spellings) > 1 for _, _, spellings in p.groups)
+            bits.append("values: %s%s%s" % (listed, " (any case)" if varies else "",
+                                             ", some empty" if p.missing else ""))
+        cols.append("%s (%s)" % (name, "; ".join(bits)) if bits else name)
     return ", ".join(cols)
+
+
+def sample_rows(table, n=2):
+    """The first rows of t exactly as SQL stores them, so the model sees real
+    values and types rather than guessing from column names."""
+    try:
+        cols, rows, _ = execute("SELECT * FROM t LIMIT %d" % n, table, n, 1.0)
+    except QueryError:
+        return []
+    def show(v):
+        if v is None:
+            return "NULL"
+        if isinstance(v, (int, float)):
+            return format_cell(float(v))
+        return "'%s'" % (v if len(str(v)) <= 30 else str(v)[:29] + "\u2026")
+    return ["(%s)" % ", ".join("%s=%s" % (c, show(v)) for c, v in zip(cols, r)) for r in rows]
 
 
 def value_rules(table):
     """How values appear in t, for both instructions."""
-    rules = ["Percentages are fractions: '10%' is 0.1; multiply by 100 to report one.",
+    rules = ["t holds only data rows: no header row and no total rows. Never compare "
+             "a column with its own header name.",
+             "Empty cells are NULL; = and != are never true for NULL, so use IS NULL, "
+             "IS NOT NULL or COALESCE(x, '').",
+             "Do all arithmetic in SQL (SUM, COUNT, AVG, ROUND); never add up results yourself.",
+             "Percentages are fractions: '10%' is 0.1; multiply by 100 to report one.",
              "Amounts like '£1,200.50' or '(120.00)' are numbers (1200.5, -120). Codes "
              "with leading zeros, like '00123', stay text.",
              "In number columns, other text (like '-', 'N/A' or 'TBC') is NULL."]
-    if any(table.column_kind(c) in ("date", "datetime") for c in range(table.width)):
+    dated = [c for c in range(table.width) if table.column_kind(c) in ("date", "datetime")]
+    if dated:
+        name = column_names(table)[dated[0]]
         rules.append("Dates are text like '2026-10-02', so compare them as text "
-                     "(d < '2026-12-01') or use date() and strftime().")
+                     "(%s < '2026-12-01') or use date() and strftime()." % name)
     if any(table.column_kind(c) == "logical" for c in range(table.width)):
         rules.append("TRUE/FALSE cells are 1 and 0, as in Calc: SUM counts the TRUE ones.")
     return rules
+
+
+def table_note(table):
+    """What t holds, for the user message. It quotes cell values, so it
+    never goes into the system prompt, where text carries more authority."""
+    return ("Table t for SQL. Columns: %s.\nFirst rows of t, as stored: %s" % (
+        describe_columns(table), " ".join(sample_rows(table)) or "(none)"))
 
 
 def sheet_instructions(table):
@@ -93,10 +137,9 @@ def sheet_instructions(table):
         "unchanged. Use it to clean or reshape data: remove duplicates, drop rows "
         "with missing values, filter, fill blanks, trim text, summarise. It must be "
         "the only operation.\n"
-        "  The selection is the table t with columns: %s. Empty cells are NULL; "
-        "missing values written as text in text columns (like 'N/A') stay text and "
-        "are listed in the column statistics. Total rows are not in t, so copies "
-        "leave them out.\n  %s\n"
+        "  The selection is the table t, described with the selection. Missing values "
+        "written as text in text columns (like 'N/A') stay text and are listed in the "
+        "column statistics. Copies leave total rows out.\n  %s\n"
         "  Keep the original column order and ORDER BY row unless asked otherwise. "
         "Do not select row unless asked.\n"
         "  Remove duplicates of a, keeping the first: SELECT a, b, c FROM (SELECT *, "
@@ -104,25 +147,23 @@ def sheet_instructions(table):
         "WHERE n = 1 ORDER BY row\n"
         "  Drop rows with a missing value: SELECT a, b, c FROM t WHERE b IS NOT NULL "
         "AND c IS NOT NULL ORDER BY row"
-        % (describe_columns(table), "\n  ".join(value_rules(table)))
+        % "\n  ".join(value_rules(table))
     )
 
 
 def instructions(table):
-    cols = describe_columns(table)
     return (
         "Some questions need every row, not just the rows shown: filtering, "
         "ranking, grouping, or totals over a subset. For those, first reply "
         "with one SQLite SELECT as JSON:\n"
         '{"sql_needed": true, "sql": "SELECT ..."}\n'
-        "The selection is the table t with columns: %s.\n"
+        "The selection is the table t, described with the selection.\n"
         "- %s\n"
-        "- Total rows are not in t.\n"
         "- Text comparisons: use LOWER(x) = 'value' to ignore case.\n"
         "- Return at most %d rows and include the name column so results are "
         "readable.\n"
         "If the shown cells and statistics already answer the question, reply "
-        '{"sql_needed": false}.' % (cols, "\n- ".join(value_rules(table)), MAX_ROWS)
+        '{"sql_needed": false}.' % ("\n- ".join(value_rules(table)), MAX_ROWS)
     )
 
 

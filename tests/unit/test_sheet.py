@@ -59,7 +59,7 @@ class RunToSheet(unittest.TestCase):
         self.assertEqual(r.rows[-1][0], "Tuvalu")
         self.assertEqual(r.totals, ["row 11: World"])
         self.assertEqual(r.left_out, [])
-        self.assertIn("Total rows are not in t, so copies leave them out",
+        self.assertIn("Copies leave total rows out",
                       S.sheet_instructions(context.Table(with_world())))
 
     def test_percent_text_becomes_number(self):
@@ -135,7 +135,11 @@ class Prompting(unittest.TestCase):
         system = msgs[0]["content"]
         self.assertIn("sql_to_sheet", system)
         self.assertLess(system.index("sql_to_sheet"), system.index("Rules:"))
-        self.assertIn("a (Name), b (City), c (Sales)", system)
+        user = msgs[1]["content"]
+        self.assertIn("a (Name; values: ", user)
+        self.assertIn("c (Sales)", user)
+        self.assertIn("First rows of t, as stored: (row=2, a='Ann', b='Leeds', c=10)", user)
+        self.assertNotIn("Leeds", system)
 
     def test_fits_window(self):
         rows = [ROWS[0]] + [["Country %d" % i, 1e8 + i, 1e8 + i * 2, "+1.0%", "Africa"]

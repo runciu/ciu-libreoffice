@@ -78,6 +78,10 @@ def instructions(table):
     return INSTRUCTIONS
 
 
+def table_note(table):
+    return ""
+
+
 def no_query_reply():
     return json.dumps({"query_needed": False})
 

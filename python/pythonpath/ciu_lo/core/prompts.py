@@ -47,12 +47,18 @@ def context_budget(n_ctx, system, request, max_tokens, scale=1.0):
     return int(max(MIN_CONTEXT_TOKENS, min(MAX_CONTEXT_TOKENS, free)))
 
 
-def _messages(system, snapshot, request, budget, issues=False):
-    extra = ""
+def _messages(system, snapshot, request, budget, issues=False, note=""):
+    """note: data-derived text for the user message (never the system one)."""
+    extra = "\n\n" + note if note else ""
     if issues:
-        found = ctxmod.find_issues(ctxmod.Table(snapshot))
-        extra = "\n\nIssues found by exact checks:\n%s" % (
+        table = ctxmod.Table(snapshot)
+        found = ctxmod.find_issues(table)
+        extra += "\n\nIssues found by exact checks:\n%s" % (
             "\n".join("- " + line for line in found) if found else "- none")
+        if table.header:
+            extra += ("\nRow %d is the header: its cells are column names, not data, "
+                      "and are never an issue." % (snapshot.start_row + 1))
+    if extra:
         budget = max(MIN_CONTEXT_TOKENS, budget - ctxmod.estimate_tokens(extra))
     block = ctxmod.render(snapshot, budget=budget)
     user = "Selection:\n%s%s\n\nRequest: %s" % (block, extra, request.strip())
@@ -71,7 +77,8 @@ def build_messages(snapshot, question, n_ctx, scale=1.0, engine=None, issues=Fal
                   "\n" + CHANGE_HINT)
         reserve = engine.RESERVE + QUERY_REPLY_TOKENS
     budget = context_budget(n_ctx, system, question, max_tokens + reserve, scale)
-    return _messages(system, snapshot, question, budget, issues), max_tokens
+    note = engine.table_note(ctxmod.Table(snapshot)) if engine is not None else ""
+    return _messages(system, snapshot, question, budget, issues, note), max_tokens
 
 
 CHANGE_HINT = (
@@ -162,7 +169,8 @@ def build_action_messages(snapshot, request, n_ctx, scale=1.0, sql=None):
         system = system.replace(marker, sql.sheet_instructions(ctxmod.Table(snapshot)) +
                                 "\n" + marker, 1)
     budget = context_budget(n_ctx, system, request, max_tokens, scale)
-    return _messages(system, snapshot, request, budget), max_tokens
+    note = sql.table_note(ctxmod.Table(snapshot)) if sql is not None else ""
+    return _messages(system, snapshot, request, budget, note=note), max_tokens
 
 
 # (button, request, include the exact issue scan)
