@@ -79,7 +79,8 @@ class Extension(unittest.TestCase):
         req = mock_ciu.STATE.last_request
         user = req["messages"][1]["content"]
         self.assertIn("B (Cost): number", user)
-        self.assertIn("1 duplicate values", user)
+        self.assertIn("all values: 'Tea' x2, 'Milk' x1", user)
+        self.assertIn("Data rows: 3 (header row not counted, 1 total row not counted)", user)
         self.assertIn("B5: =SUM(B2:B4)", user)
         self.assertIn("Request: What is the total cost?", user)
 

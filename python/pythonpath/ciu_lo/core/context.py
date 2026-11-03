@@ -7,7 +7,7 @@ fill whatever budget remains.
 import math
 import re
 
-from .values import is_iso_date
+from .values import is_iso_date, to_number
 
 
 class Snapshot(object):
@@ -15,7 +15,7 @@ class Snapshot(object):
 
     def __init__(self, doc_title, sheet, start_col, start_row, rows,
                  formulas=None, total_rows=None, total_cols=None,
-                 scope_note=None, hints=None, kinds=None):
+                 scope_note=None, hints=None, kinds=None, typed_dates=None):
         self.doc_title = doc_title
         self.sheet = sheet
         self.start_col = start_col
@@ -29,6 +29,7 @@ class Snapshot(object):
         # column index -> how Calc displays it: "date", "datetime", "time",
         # "percent", "logical" or "currency" (set by the Calc reader).
         self.kinds = kinds or {}
+        self.typed_dates = typed_dates or {}  # column -> row indexes typed as text
 
     @property
     def n_read(self):
@@ -101,8 +102,12 @@ class ColumnProfile(object):
         self.count = len(kept)
         filled = [values[i] for i in kept if not is_empty(values[i])]
         self.missing = self.count - len(filled)
-        nums = [float(v) for v in filled if is_num(v)]
-        texts = [v for v in filled if not is_num(v)]
+        # Text such as "£1,200.50" or "(120.00)" counts as a number, as in SQL;
+        # Calc's own SUM skips it, which describe() reports.
+        nums = [to_number(v) for v in filled if to_number(v) is not None]
+        texts = [v for v in filled if to_number(v) is None]
+        self.number_text = sum(1 for v in filled if isinstance(v, str) and to_number(v) is not None)
+        self.real_sum = math.fsum(float(v) for v in filled if is_num(v))
         self.dates = sorted((i for i in kept if is_iso_date(values[i])),
                             key=lambda i: values[i])
         if not filled:
@@ -115,14 +120,18 @@ class ColumnProfile(object):
             self.kind = "text"
         else:
             self.kind = "mixed (%d numbers, %d text)" % (len(nums), len(texts))
-        seen, dup_values = {}, 0
+        # Values grouped ignoring case and outer spaces; each group is shown
+        # in its most common spelling, so counts never invent a casing.
+        groups = {}
         for v in filled:
-            key = fmt(v) if is_num(v) else str(v).strip().lower()
-            seen[key] = seen.get(key, 0) + 1
-        self.unique = len(seen)
-        self.duplicates = sum(n - 1 for n in seen.values() if n > 1)
-        self.top_repeats = sorted(((n, k) for k, n in seen.items() if n > 1),
-                                  reverse=True)[:3]
+            shown = fmt(v).strip()
+            key = shown.lower()
+            g = groups.setdefault(key, {})
+            g[shown] = g.get(shown, 0) + 1
+        self.groups = sorted(((sum(g.values()), max(g, key=g.get), sorted(g)) for g in groups.values()),
+                             key=lambda x: (-x[0], x[1]))
+        self.unique = len(groups)
+        self.duplicates = sum(n - 1 for n, _, _ in self.groups if n > 1)
         markers = {}
         for v in filled:
             if isinstance(v, str) and v.strip().lower() in NA_MARKERS:
@@ -132,14 +141,16 @@ class ColumnProfile(object):
                                 and _PERCENT.match(v.strip().lstrip("'")))
         self.nums = nums
         # Indexes into values, so callers can say which row holds an extreme.
-        self.ranked = sorted((i for i in kept if is_num(values[i])),
-                             key=lambda i: float(values[i]))
+        self.ranked = sorted((i for i in kept if to_number(values[i]) is not None
+                              and not is_iso_date(values[i])),
+                             key=lambda i: to_number(values[i]))
         if nums:
             self.min, self.max = min(nums), max(nums)
             self.sum = math.fsum(nums)
             self.mean = self.sum / len(nums)
         else:
             self.min = self.max = self.sum = self.mean = None
+        self.typed_dates = []  # set by Table: sheet rows of dates typed as text
         self.where = None    # set by Table: index -> "row N: label"
         self.display = None  # set by Table: the column's Calc display kind
         self.values = values
@@ -152,6 +163,11 @@ class ColumnProfile(object):
             bits.append("%d look like missing-value markers (%s)" % (
                 sum(self.na_markers.values()),
                 ", ".join("%r x%d" % (k, n) for k, n in sorted(self.na_markers.items()))))
+        if self.typed_dates:
+            rows = ", ".join(str(r) for r in self.typed_dates[:6])
+            bits.append("%d date%s typed as text, read as dates (row%s %s)" % (
+                len(self.typed_dates), "" if len(self.typed_dates) == 1 else "s",
+                "" if len(self.typed_dates) == 1 else "s", rows))
         if self.dates:
             first, last = self.dates[0], self.dates[-1]
             where = (lambda i: " (%s)" % self.where(i)) if self.where else (lambda i: "")
@@ -168,19 +184,41 @@ class ColumnProfile(object):
                 top = [self.where(i, label_only=True) for i in reversed(self.ranked[-3:])]
                 low = [self.where(i, label_only=True) for i in self.ranked[:3]]
                 bits.append("highest: %s; lowest: %s" % (", ".join(top), ", ".join(low)))
+        if self.number_text:
+            bits.append("%d number%s stored as text, included above" % (
+                self.number_text, "" if self.number_text == 1 else "s"))
         if self.kind != "empty":
             bits.append("%d unique" % self.unique)
         if self.display == "percent":
             bits.append("stored as fractions and shown as percentages (0.2 shows as 20%)")
         elif self.display == "logical":
             bits.append("TRUE/FALSE values")
-        if self.percent_text and self.percent_text * 2 >= len(self.nums) + self.percent_text:
+        if self.percent_text and self.percent_text * 2 >= len(self.nums):
             bits.append("percentages stored as text, like '10%'; in formulas Calc reads "
                         "'10%' as 0.1, so do not divide by 100")
-        if self.duplicates:
-            reps = ", ".join("%r x%d" % (k, n) for n, k in self.top_repeats)
-            bits.append("%d duplicate values (%s)" % (self.duplicates, reps))
+        categorical = self.kind in ("text", "empty") or self.kind.startswith("mixed")
+        if categorical and self.duplicates:
+            if self.unique <= 12:
+                bits.append("all values: " + ", ".join(
+                    "%s x%d" % (_quote(shown), n) for n, shown, _ in self.groups))
+            else:
+                top = [(n, shown) for n, shown, _ in self.groups if n > 1][:5]
+                bits.append("most repeated of %d distinct: %s" % (
+                    self.unique, ", ".join("%s x%d" % (_quote(shown), n) for n, shown in top)))
+        elif self.duplicates:
+            top = [(n, shown) for n, shown, _ in self.groups if n > 1][:3]
+            bits.append("%d repeated values (%s)" % (
+                self.duplicates, ", ".join("%s x%d" % (_quote(shown), n) for n, shown in top)))
+        variants = [spellings for _, _, spellings in self.groups if len(spellings) > 1]
+        if variants:
+            bits.append("spelling varies: " + "; ".join(
+                "/".join(_quote(v) for v in spellings[:4]) for spellings in variants[:4]))
         return "; ".join(bits)
+
+
+def _quote(text, limit=30):
+    text = str(text)
+    return "'%s'" % (text if len(text) <= limit else text[:limit - 1] + "\u2026")
 
 
 def _is_total_label(text):
@@ -208,10 +246,13 @@ def _total_rows(body, profiles, label_col):
         if len(p.ranked) < 3:
             continue
         i = p.ranked[-1]
-        top = float(body[i][p.col_index])
-        rest = p.sum - top
-        if rest > 0 and abs(top - rest) <= TOTAL_TOLERANCE * rest:
-            found.add(i)
+        top = to_number(body[i][p.col_index])
+        # Compare with the parsed sum and with Calc's own SUM, which skips
+        # numbers stored as text.
+        for total in (p.sum, p.real_sum):
+            rest = total - top
+            if rest > 0 and abs(top - rest) <= TOTAL_TOLERANCE * rest:
+                found.add(i)
     return found
 
 
@@ -246,9 +287,13 @@ class Table(object):
         self.blanks = {i for i, row in enumerate(self.body) if all(is_empty(v) for v in row)}
         self.skipped = self.totals | self.blanks
         self.profiles = self._profiles(self.skipped) if self.skipped else profiles
+        typed = snapshot.typed_dates
+        offset = 1 if self.header else 0
         for p in self.profiles:
             p.where = self.where
             p.display = snapshot.kinds.get(p.col_index)
+            p.typed_dates = [snapshot.start_row + r + 1 for r in typed.get(p.col_index, [])
+                             if r - offset not in self.skipped]
 
     def column_kind(self, c):
         """"date", "datetime", "time", "percent", "logical", "currency" or None."""
@@ -258,7 +303,7 @@ class Table(object):
         p = self.profiles[c] if c < len(self.profiles) else None
         if p is not None and p.kind == "date":
             return "date"
-        if p is not None and p.percent_text and p.percent_text * 2 >= len(p.nums) + p.percent_text:
+        if p is not None and p.percent_text and p.percent_text * 2 >= len(p.nums):
             return "percent"
         return None
 
@@ -292,6 +337,28 @@ def profile(snapshot):
     return t.header, t.profiles, [t.where(i) for i in sorted(t.totals)]
 
 
+def _total_mismatches(table):
+    """When there is one total row, say where it disagrees with the values
+    above it, for example because Calc's SUM skipped numbers stored as text."""
+    if len(table.totals) != 1:
+        return []
+    i = next(iter(table.totals))
+    row = table.body[i]
+    notes = []
+    for p in table.profiles:
+        c = p.col_index
+        stated = to_number(row[c]) if c < len(row) else None
+        if stated is None or not p.nums:
+            continue
+        if abs(stated - p.sum) > max(0.005 * abs(p.sum), 0.01):
+            reason = (" (%d numbers stored as text are not included by Calc's SUM)" % p.number_text
+                      if p.number_text and abs(stated - p.real_sum) <= max(0.005 * abs(p.real_sum), 0.01)
+                      else "")
+            notes.append("Total row %d: %s shows %s, but the values above add up to %s%s." % (
+                table.row_number(i), p.name, fmt(stated), fmt(p.sum), reason))
+    return notes
+
+
 def fmt(v):
     """Numbers without float noise: 0.1+0.2 shows as 0.3, 3.0 as 3."""
     if v is None:
@@ -306,7 +373,7 @@ def fmt(v):
 
 def _cell_text(v, limit=40):
     s = fmt(v).replace("\t", " ").replace("\n", " ")
-    return s if len(s) <= limit else s[:limit - 1] + "~"
+    return s if len(s) <= limit else s[:limit - 1] + "\u2026"
 
 
 def estimate_tokens(text):
@@ -344,8 +411,17 @@ def render(snapshot, budget=2000, max_formulas=25, measure=estimate_tokens):
         "yes (row %d)" % (snapshot.start_row + 1) if header else "not detected"))
     for h in snapshot.hints:
         lines.append(h)
+    table = Table(snapshot)
+    data_rows = len(table.body) - len(table.skipped)
+    lines.append("Data rows: %d (%s)" % (data_rows, ", ".join(
+        part for part in ("header row not counted" if header else "",
+                          "%d total row%s not counted" % (len(table.totals), "" if len(table.totals) == 1 else "s")
+                          if table.totals else "",
+                          "%d empty row%s skipped" % (len(table.blanks), "" if len(table.blanks) == 1 else "s")
+                          if table.blanks else "") if part) or "no header or total rows"))
     if totals:
         lines.append("Total rows (left out of the statistics): %s" % ", ".join(totals[:5]))
+        lines.extend(_total_mismatches(table))
 
     if profiles:
         lines.append("")

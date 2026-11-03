@@ -73,8 +73,8 @@ def read_selection(model, controller=None):
         addr.EndColumn, addr.StartRow + read_rows - 1)
     rows = [list(r) for r in block.getDataArray()]
     formulas = [list(r) for r in block.getFormulaArray()]
-    rows, kinds = apply_kinds(rows, display_kinds(model, sheet, addr.StartColumn,
-                                                  addr.StartRow, rows))
+    rows, kinds, typed = apply_kinds(rows, display_kinds(model, sheet, addr.StartColumn,
+                                                         addr.StartRow, rows))
 
     return Snapshot(
         doc_title=doc_title(controller),
@@ -88,6 +88,7 @@ def read_selection(model, controller=None):
         scope_note=scope_note,
         hints=_free_space_hints(sheet, addr),
         kinds=kinds,
+        typed_dates=typed,
     )
 
 
@@ -109,8 +110,8 @@ def read_full(model, snapshot, max_cells=FULL_MAX_CELLS):
         snapshot.start_col + snapshot.total_cols - 1,
         snapshot.start_row + snapshot.total_rows - 1)
     rows = [list(r) for r in block.getDataArray()]
-    rows, kinds = apply_kinds(rows, display_kinds(model, sheet, snapshot.start_col,
-                                                  snapshot.start_row, rows))
+    rows, kinds, typed = apply_kinds(rows, display_kinds(model, sheet, snapshot.start_col,
+                                                         snapshot.start_row, rows))
     return Snapshot(
         doc_title=snapshot.doc_title,
         sheet=snapshot.sheet,
@@ -120,6 +121,7 @@ def read_full(model, snapshot, max_cells=FULL_MAX_CELLS):
         total_rows=snapshot.total_rows,
         total_cols=snapshot.total_cols,
         kinds=kinds,
+        typed_dates=typed,
     )
 
 

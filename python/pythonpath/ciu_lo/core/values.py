@@ -152,13 +152,15 @@ DATE_KINDS = ("date", "datetime", "time")
 
 
 def apply_kinds(rows, kinds, min_share=0.6):
-    """Rows rewritten so each value matches how Calc shows it, plus the
-    final column kinds. Day numbers in date columns become ISO text, TRUE/
+    """Rows rewritten so each value matches how Calc shows it, the final
+    column kinds, and {column: [row indexes]} of dates that were typed as
+    text (worth reporting, since such dates break Calc formulas). Day numbers in date columns become ISO text, TRUE/
     FALSE cells become those words, and a column whose text mostly reads as
     dates becomes a date column. Text that cannot be read is left alone."""
     kinds = dict(kinds)
     width = max((len(r) for r in rows), default=0)
     out = [list(r) for r in rows]
+    typed = {}
     for c in range(width):
         cells = [r[c] for r in out if c < len(r)]
         texts = [v for v in cells if isinstance(v, str) and v.strip()]
@@ -171,7 +173,7 @@ def apply_kinds(rows, kinds, min_share=0.6):
         kind = kinds.get(c)
         if kind is None:
             continue
-        for r in out:
+        for n, r in enumerate(out):
             if c >= len(r):
                 continue
             v = r[c]
@@ -182,6 +184,7 @@ def apply_kinds(rows, kinds, min_share=0.6):
                     iso = parse_date(v, order)
                     if iso:
                         r[c] = iso
+                        typed.setdefault(c, []).append(n)
             elif kind == "logical" and _is_num(v):
                 r[c] = "TRUE" if v else "FALSE"
-    return out, kinds
+    return out, kinds, typed
