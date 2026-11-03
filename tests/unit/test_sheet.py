@@ -142,6 +142,13 @@ class Prompting(unittest.TestCase):
             used = sum(context.estimate_tokens(m["content"]) for m in msgs)
             self.assertLess(used + max_tokens, n_ctx, n_ctx)
 
+    def test_text_percentages_noted(self):
+        out = context.render(snapshot(ROWS))
+        line = [l for l in out.splitlines() if l.startswith("- D (Change)")][0]
+        self.assertIn("Calc reads '10%' as 0.1, so do not divide by 100", line)
+        line = [l for l in out.splitlines() if l.startswith("- B (Pop 2022)")][0]
+        self.assertNotIn("percentages", line)
+
     def test_missing_markers_in_stats(self):
         out = context.render(snapshot(MESSY))
         self.assertIn("B (City): text; 1 missing; 2 look like missing-value markers ('-' x1, 'N/A' x1)", out)

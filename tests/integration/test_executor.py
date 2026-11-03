@@ -219,6 +219,29 @@ class Executor(unittest.TestCase):
         with self.assertRaises(reader.SelectionError):
             reader.read_full(self.doc, snap, max_cells=100)
 
+    def test_preview_calculates_without_changing_anything(self):
+        self.doc.setModified(False)
+        self.cell("H1").setString("user edit")
+        self.doc.setModified(False)
+        p = plan({"tool": "set_values", "target": "D1", "values": [["Total"]]},
+                 {"tool": "fill_formula", "target": "D2:D4", "formula": "=B2*C2"})
+        before = self.sheet.getCellRangeByName("A1:E5").getFormulaArray()
+        result = executor.preview(self.doc, p)
+        self.assertEqual(result.rejected, [])
+        self.assertEqual(result.samples[0], ("D2", "6", [("B2", "2"), ("C2", "3")]))
+        self.assertEqual([s[0] for s in result.samples], ["D2", "D3", "D4"])
+        self.assertEqual(self.sheet.getCellRangeByName("A1:E5").getFormulaArray(), before)
+        self.assertFalse(self.doc.isModified())
+        self.assertFalse(self.um.isRedoPossible())
+        self.assertEqual(self.um.getCurrentUndoActionTitle(), "Input")
+        self.assertEqual(self.cell("H1").getString(), "user edit")
+
+    def test_preview_reports_rejected_formulas(self):
+        p = plan({"tool": "fill_formula", "target": "D2:D4", "formula": "=SUMM(B2:C2)"})
+        result = executor.preview(self.doc, p)
+        self.assertEqual(result.rejected[0], ("D2", "Err:525 unknown name (#NAME?)"))
+        self.assertEqual(self.cell("D2").getFormula(), "")
+
     def test_free_space_hints(self):
         self.doc.getCurrentController().select(self.cell("A1:C4"))
         snap = reader.read_selection(self.doc)

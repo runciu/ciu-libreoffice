@@ -6,7 +6,9 @@ the whole plan back; data errors such as #DIV/0! are kept and reported.
 
 from com.sun.star.sheet.FillDirection import TO_BOTTOM, TO_RIGHT
 
-from ..core.plan import box_ref
+import re
+
+from ..core.plan import box_ref, parse_cell
 
 # Calc error codes that mean "this formula is wrong", not "the data is odd".
 ROLLBACK_ERRORS = {
@@ -143,6 +145,54 @@ def apply_sheet(doc, wanted_name, result, source_sheet):
     return ApplyResult(True, "Created sheet '%s' with %d row%s. Your original sheet is "
                              "unchanged. Ctrl+Z (Cmd+Z) removes the new sheet."
                        % (name, n, "" if n == 1 else "s"))
+
+
+PREVIEW_TITLE = "CIU: preview"
+_REF = re.compile(r"(?<![A-Za-z0-9_.$])\$?([A-Z]{1,3})\$?([0-9]{1,7})(?![0-9(])")
+
+
+class Preview(object):
+    def __init__(self, samples, rejected):
+        self.samples = samples      # [(ref, shown value, [(input ref, shown value)])]
+        self.rejected = rejected    # [(ref, reason)] Calc would roll back on apply
+
+
+def preview(doc, plan, per_op=3):
+    """Calculate a few result cells by applying the plan and undoing it at
+    once, so the user can check real numbers before applying. The document's
+    modified flag and redo history are left as they were before."""
+    sheet = get_sheet(doc, plan.sheet)
+    um = doc.getUndoManager()
+    was_modified = doc.isModified()
+    targets = []
+    for op in plan.operations:
+        if op.tool == "set_values":
+            continue
+        c0, r0, c1, r1 = op.box
+        cells = [(c, r) for r in range(r0, r1 + 1) for c in range(c0, c1 + 1)]
+        targets.extend(cells[:per_op])
+    um.enterUndoContext(PREVIEW_TITLE)
+    try:
+        for op in plan.operations:
+            _write(sheet, op)
+        samples = []
+        for c, r in targets:
+            cell = sheet.getCellByPosition(c, r)
+            inputs = []
+            for col, row in _REF.findall(cell.getFormula())[:4]:
+                ic, ir = parse_cell(col + row)
+                inputs.append((col + row, sheet.getCellByPosition(ic, ir).getString() or "(empty)"))
+            samples.append((box_ref(c, r), cell.getString() or "(empty)", inputs))
+        rejected, _ = _check_errors(sheet, plan)
+    finally:
+        um.leaveUndoContext()
+        _rollback(um, PREVIEW_TITLE)
+        try:
+            um.clearRedo()
+        except Exception:
+            pass
+        doc.setModified(was_modified)
+    return Preview(samples, rejected)
 
 
 def _write(sheet, op):

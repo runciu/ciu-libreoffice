@@ -373,6 +373,23 @@ class AssistantDialog(object):
                 len(occupied), "" if len(occupied) == 1 else "s", shown, more))
         else:
             lines.append("Overwrites: nothing, all target cells are empty.")
+        try:
+            trial = executor.preview(self._model_doc(), plan)
+        except Exception as e:
+            trial = None
+            lines.append("(Could not calculate a preview: %s)" % e)
+        if trial and trial.rejected:
+            lines = ["CIU's change would be rejected by Calc, so nothing was changed:"]
+            lines += ["  %s: %s" % (ref, why) for ref, why in trial.rejected[:6]]
+            lines += ["", "Proposed: " + plan.describe()]
+            self._show_answer("\n".join(lines))
+            return
+        if trial and trial.samples:
+            lines += ["", "Results (calculated, not yet applied):"]
+            for ref, value, inputs in trial.samples:
+                used = ", ".join("%s = %s" % (r, _clip(v, 16)) for r, v in inputs)
+                lines.append("  %s = %s%s" % (ref, _clip(value, 20), "  (%s)" % used if used else ""))
+            lines.append("Check these numbers before applying.")
         lines.append("")
         lines.append("Click Apply to make the change, or Discard.")
         self._show_answer("\n".join(lines))

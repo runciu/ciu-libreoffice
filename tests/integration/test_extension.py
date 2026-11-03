@@ -258,6 +258,8 @@ class Extension(unittest.TestCase):
         self.assertIn("Proposed change (not applied yet):", state["answer"])
         self.assertIn("C2: =ROUND(B2*1.2;2), filled across C2:C4 (3 cells)", state["answer"])
         self.assertIn("Overwrites: nothing", state["answer"])
+        self.assertIn("Results (calculated, not yet applied):\n  C2 = 2.4  (B2 = 2)", state["answer"])
+        self.assertIn("  C3 = 1.8  (B3 = 1.5)", state["answer"])
         self.assertTrue(state["pending"] and state["apply_enabled"])
         self.assertEqual(self.sheet.getCellRangeByName("C2").getFormula(), "")
         req = mock_ciu.STATE.last_request
@@ -275,18 +277,29 @@ class Extension(unittest.TestCase):
 
     def test_6b_overwrite_warning_then_discard(self):
         mock_ciu.STATE.plan_reply = json.dumps({
-            "summary": "Double the costs.", "operations": [
-                {"tool": "fill_formula", "target": "B2:B4", "formula": "=B2*2"}]})
-        OFFICE.hook("prompt:double the costs in place")
+            "summary": "Replace items with doubled costs.", "operations": [
+                {"tool": "fill_formula", "target": "A2:A4", "formula": "=B2*2"}]})
+        OFFICE.hook("prompt:replace the item names with double the cost")
         OFFICE.hook("press:change")
         state = wait_done()
-        self.assertIn("WARNING: overwrites 3 filled cells: B2 (2), B3 (1.5), B4 (2)", state["answer"])
+        self.assertIn("WARNING: overwrites 3 filled cells: A2 (Tea), A3 (Milk), A4 (Tea)", state["answer"])
         self.assertEqual(state["apply_label"], "Apply (overwrite 3)")
         OFFICE.hook("press:discard")
         state = json.loads(OFFICE.hook("poll"))
         self.assertIn("Discarded", state["answer"])
         self.assertFalse(state["pending"])
-        self.assertEqual(self.sheet.getCellRangeByName("B3").getValue(), 1.5)
+        self.assertEqual(self.sheet.getCellRangeByName("A3").getString(), "Milk")
+
+    def test_6b2_rejected_formula_caught_in_preview(self):
+        mock_ciu.STATE.plan_reply = json.dumps({"summary": "x", "operations": [
+            {"tool": "fill_formula", "target": "C2:C4", "formula": "=AVERAGEE(B2)"}]})
+        OFFICE.hook("prompt:average")
+        OFFICE.hook("press:change")
+        state = wait_done()
+        self.assertIn("would be rejected by Calc, so nothing was changed", state["answer"])
+        self.assertIn("C2: Err:525 unknown name", state["answer"])
+        self.assertFalse(state["pending"])
+        self.assertEqual(self.sheet.getCellRangeByName("C2").getFormula(), "")
 
     def test_6c_unsafe_plan_refused(self):
         mock_ciu.STATE.plan_reply = json.dumps({

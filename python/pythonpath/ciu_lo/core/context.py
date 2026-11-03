@@ -5,6 +5,7 @@ fill whatever budget remains.
 """
 
 import math
+import re
 
 
 class Snapshot(object):
@@ -79,6 +80,7 @@ def detect_header(rows):
     return not any(str(v) in body_vals for v in non_empty) and len(non_empty) == len(first)
 
 
+_PERCENT = re.compile(r"^[+\-\u2212]?\d+(?:[.,]\d+)?\s*%$")
 NA_MARKERS = ("n/a", "na", "#n/a", "-", "--", "null", "none", "nan", "?", "missing")
 TOTAL_LABELS = ("total", "totals", "grand total", "sum", "world", "all", "overall")
 TOTAL_TOLERANCE = 0.03
@@ -115,6 +117,8 @@ class ColumnProfile(object):
             if isinstance(v, str) and v.strip().lower() in NA_MARKERS:
                 markers[v.strip()] = markers.get(v.strip(), 0) + 1
         self.na_markers = markers
+        self.percent_text = sum(1 for v in filled if isinstance(v, str)
+                                and _PERCENT.match(v.strip().lstrip("'")))
         self.nums = nums
         # Indexes into values, so callers can say which row holds an extreme.
         self.ranked = sorted((i for i in kept if is_num(values[i])),
@@ -148,6 +152,9 @@ class ColumnProfile(object):
                 bits.append("highest: %s; lowest: %s" % (", ".join(top), ", ".join(low)))
         if self.kind != "empty":
             bits.append("%d unique" % self.unique)
+        if self.percent_text and self.percent_text * 2 >= len(self.nums) + self.percent_text:
+            bits.append("percentages stored as text, like '10%'; in formulas Calc reads "
+                        "'10%' as 0.1, so do not divide by 100")
         if self.duplicates:
             reps = ", ".join("%r x%d" % (k, n) for n, k in self.top_repeats)
             bits.append("%d duplicate values (%s)" % (self.duplicates, reps))
