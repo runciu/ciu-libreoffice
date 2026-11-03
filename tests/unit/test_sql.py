@@ -138,6 +138,24 @@ class Parsing(unittest.TestCase):
         self.assertEqual(json.loads(example)["sql_needed"], True)
 
 
+class Routing(unittest.TestCase):
+    def test_wants_change(self):
+        self.assertTrue(prompts.wants_change('{"change_request": true}'))
+        self.assertTrue(prompts.wants_change('ok {"change_request": true, "sql_needed": false}'))
+        for reply in ('{"change_request": false}', '{"sql_needed": true, "sql": "SELECT 1"}',
+                      '{"change_request": "yes"}', "", "not json", None):
+            self.assertFalse(prompts.wants_change(reply), reply)
+
+    def test_hint_and_schema(self):
+        for eng in (S, Q):
+            msgs, _ = prompts.build_messages(snapshot(), "add a column", 4096, engine=eng)
+            self.assertIn('{"change_request": true}', msgs[0]["content"])
+            self.assertIn("change_request", eng.SCHEMA["properties"])
+        msgs, _ = prompts.build_messages(snapshot(), "q", 4096)
+        self.assertNotIn("change_request", msgs[0]["content"])
+        self.assertIn("Formulas listed under Formulas are exact", msgs[0]["content"])
+
+
 class Fallback(unittest.TestCase):
     def test_engine_choice(self):
         self.assertIs(engine.current(), S)

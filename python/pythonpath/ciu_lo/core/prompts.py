@@ -9,6 +9,8 @@ SYSTEM = (
     "- The column statistics were computed exactly. Use them; do not redo "
     "arithmetic they already answer.\n"
     "- Refer to cells and ranges by address (B2, C2:C40).\n"
+    "- Formulas listed under Formulas are exact. Quote them as written and "
+    "never describe a formula as doing more than it says.\n"
     "- Formulas must be LibreOffice Calc syntax, start with '=', and use ';' "
     "between function arguments. Put each formula on its own line.\n"
     "- If the shown cells are not enough to answer, say what is missing.\n"
@@ -57,10 +59,28 @@ def build_messages(snapshot, question, n_ctx, scale=1.0, engine=None):
     system = SYSTEM
     reserve = 0
     if engine is not None:
-        system = SYSTEM + "\n\n" + engine.instructions(ctxmod.Table(snapshot))
+        system = (SYSTEM + "\n\n" + engine.instructions(ctxmod.Table(snapshot)) +
+                  "\n" + CHANGE_HINT)
         reserve = engine.RESERVE + QUERY_REPLY_TOKENS
     budget = context_budget(n_ctx, system, question, max_tokens + reserve, scale)
     return _messages(system, snapshot, question, budget), max_tokens
+
+
+CHANGE_HINT = (
+    "If the request asks to change the sheet (add, fill, insert, delete, remove, "
+    "clean, sort, or create something) rather than asking a question, reply "
+    '{"change_request": true} and nothing else.'
+)
+
+
+def wants_change(reply):
+    """True when the query step says the request is really a change."""
+    from .plan import extract_json
+    try:
+        data = extract_json(reply or "")
+    except Exception:
+        return False
+    return isinstance(data, dict) and data.get("change_request") is True
 
 
 def follow_up(messages, query_reply, result):

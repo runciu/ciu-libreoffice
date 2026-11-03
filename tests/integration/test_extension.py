@@ -190,6 +190,23 @@ class Extension(unittest.TestCase):
                       mock_ciu.STATE.requests[-1]["messages"][-1]["content"])
         self.assertEqual(self.sheet.getCellRangeByName("B2").getValue(), 2.0)
 
+    def test_5d2_change_typed_into_ask_is_proposed(self):
+        mock_ciu.STATE.plan_replies = [
+            '{"change_request": true}',
+            json.dumps({"summary": "Add a Double column.", "operations": [
+                {"tool": "fill_formula", "target": "C2:C4", "formula": "=B2*2"}]})]
+        OFFICE.hook("prompt:Add a column with double the cost")
+        OFFICE.hook("press:ask")
+        state = wait_done()
+        self.assertIn("Proposed change (not applied yet):", state["answer"])
+        self.assertIn("C2: =B2*2, filled across C2:C4", state["answer"])
+        self.assertTrue(state["pending"])
+        router, plan_call = mock_ciu.STATE.requests
+        self.assertIn("change_request", router["messages"][0]["content"])
+        self.assertIn("operations", json.dumps(plan_call["response_format"]))
+        self.assertEqual(self.sheet.getCellRangeByName("C2").getString(), "")
+        OFFICE.hook("press:discard")
+
     def test_5e_clean_into_new_sheet(self):
         sql = ("SELECT a, b FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY LOWER(a) "
                "ORDER BY row) AS n FROM t) WHERE n = 1 ORDER BY row")

@@ -33,6 +33,7 @@ RESERVE = 900  # tokens for one retry plus the result
 SCHEMA = {
     "type": "object",
     "properties": {
+        "change_request": {"type": "boolean"},
         "sql_needed": {"type": "boolean"},
         "sql": {"type": "string"},
     },

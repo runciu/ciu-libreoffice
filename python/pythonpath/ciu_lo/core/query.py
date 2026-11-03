@@ -21,6 +21,7 @@ AGGREGATES = ("none", "count", "sum", "mean", "median", "min", "max")
 QUERY_SCHEMA = {
     "type": "object",
     "properties": {
+        "change_request": {"type": "boolean"},
         "query_needed": {"type": "boolean"},
         "filters": {
             "type": "array",

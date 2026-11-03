@@ -264,6 +264,9 @@ class AssistantDialog(object):
                     snap, messages, max_tokens, engine))
             if self.stop_event.is_set():
                 self.ui.post(lambda: self._append_answer("\n[stopped]"))
+        except _Reroute:
+            # A change typed into Ask: run Propose change instead of refusing.
+            self._work_plan(snap, question)
         except CIUError as e:
             msg = str(e)
             self.ui.post(lambda: self._append_answer("\n" + msg))
@@ -297,6 +300,8 @@ class AssistantDialog(object):
             reply = reply or engine.no_query_reply()
             if self.stop_event.is_set():
                 break
+            if attempt == 0 and prompts.wants_change(reply):
+                raise _Reroute()
             try:
                 q = engine.parse(reply, snap)
                 if q is None:
@@ -435,6 +440,10 @@ class AssistantDialog(object):
 
     def _controller(self):
         return self.frame.getController()
+
+
+class _Reroute(Exception):
+    """Raised inside Ask when the request turns out to be a change."""
 
 
 def _clip(text, n=18):
