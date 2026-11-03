@@ -42,6 +42,7 @@ class RunToSheet(unittest.TestCase):
     def test_drop_missing_including_markers(self):
         sql = ("SELECT a, b, c FROM t WHERE b IS NOT NULL AND c IS NOT NULL "
                "AND b NOT IN ('N/A', '-') ORDER BY row")
+        # City is a text column, so its markers stay text and are matched by value.
         r = S.run_to_sheet(sql, table())
         self.assertEqual([row[0] for row in r.rows], ["Ann", " ann ", "Bob"])
 

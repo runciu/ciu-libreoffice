@@ -46,6 +46,14 @@ class Results(unittest.TestCase):
         self.assertIn("Bulgaria | -0.44", out)
         self.assertIn("COUNT(*)\n2", run("SELECT COUNT(*) FROM t WHERE d < 0").replace(" ", ""))
 
+    def test_text_in_number_column_is_null(self):
+        rows = [["Item", "Price", "Note"], ["a", 7.0, "ok"], ["b", 7.0, "ok"], ["c", 7.2, "-"],
+                ["d", 6.9, "ok"], ["e", "-", "late"], ["f", "N/A", "ok"]]
+        snap = snapshot(rows)
+        self.assertIn("\n7.025", run("SELECT AVG(b) FROM t", snap))
+        self.assertIn("\n2", run("SELECT COUNT(*) FROM t WHERE b IS NULL", snap))
+        self.assertIn("\n1", run("SELECT COUNT(*) FROM t WHERE c = '-'", snap))
+
     def test_row_column_is_sheet_row(self):
         self.assertIn("9 | Nigeria", run("SELECT row, a FROM t WHERE a = 'Nigeria'"))
 

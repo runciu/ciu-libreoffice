@@ -74,7 +74,8 @@ def sheet_instructions(table):
         "the only operation.\n"
         "  The selection is the table t with columns: %s. Empty cells are NULL; "
         "missing values written as text (like 'N/A' or '-') are listed in the "
-        "column statistics. Numbers stored as text, like \"+4.68%%\", are numbers.%s\n"
+        "column statistics. Numbers stored as text, like \"+4.68%%\", are numbers; in "
+        "number columns, other text is NULL.%s\n"
         "  Keep the original column order and ORDER BY row unless asked otherwise. "
         "Do not select row unless asked.\n"
         "  Remove duplicates of a, keeping the first: SELECT a, b, c FROM (SELECT *, "
@@ -95,7 +96,8 @@ def instructions(table):
         "with one SQLite SELECT as JSON:\n"
         '{"sql_needed": true, "sql": "SELECT ..."}\n'
         "The selection is the table t with columns: %s.\n"
-        "- Numbers stored as text, like \"+4.68%%\", are already numbers (4.68).\n"
+        "- Numbers stored as text, like \"+4.68%%\", are already numbers (4.68). "
+        "In number columns, other text (like '-' or 'N/A') is NULL.\n"
         "- Total rows are not in t.\n"
         "- Text comparisons: use LOWER(x) = 'value' to ignore case.\n"
         "- Return at most %d rows and include the name column so results are "
@@ -212,12 +214,30 @@ def format_cell(v):
     return s if len(s) <= 40 else s[:39] + "~"
 
 
+def numeric_columns(table):
+    """Columns where most filled cells hold numbers (or text that reads as one)."""
+    found = set()
+    for c in range(table.width):
+        nums = text = 0
+        for i, row in enumerate(table.body):
+            if i in table.totals or c >= len(row) or is_empty(row[c]):
+                continue
+            if to_number(row[c]) is None:
+                text += 1
+            else:
+                nums += 1
+        if nums > text:
+            found.add(c)
+    return found
+
+
 def _load(table, include_totals=False):
     if not AVAILABLE:
         raise QueryError("SQLite is not available in this LibreOffice.")
     conn = sqlite3.connect(":memory:")
     names = column_names(table)
     conn.execute("CREATE TABLE t (row INTEGER, %s)" % ", ".join('"%s"' % n for n in names))
+    numeric = numeric_columns(table)
     data = []
     for i, row in enumerate(table.body):
         if i in table.totals and not include_totals:
@@ -225,11 +245,15 @@ def _load(table, include_totals=False):
         values = [table.row_number(i)]
         for c in range(table.width):
             v = row[c] if c < len(row) else ""
-            if is_empty(v):
+            n = None if is_empty(v) else to_number(v)
+            if n is not None:
+                values.append(n)
+            elif is_empty(v) or c in numeric:
+                # Text in a number column ("-", "N/A", "TBC") is a missing value.
+                # Left as text, SQLite would count it as 0 in SUM and AVG.
                 values.append(None)
             else:
-                n = to_number(v)
-                values.append(n if n is not None else fmt(v))
+                values.append(fmt(v))
         data.append(values)
     conn.executemany("INSERT INTO t VALUES (%s)" % ", ".join("?" * (table.width + 1)), data)
     conn.commit()
