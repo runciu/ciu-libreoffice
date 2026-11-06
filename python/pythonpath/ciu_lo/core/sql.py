@@ -198,7 +198,11 @@ def sheet_instructions(table):
         "  Remove duplicates of %(key)s, keeping the first: SELECT %(cols)s FROM (SELECT *, "
         "ROW_NUMBER() OVER (PARTITION BY %(key)s ORDER BY row) AS n FROM t) "
         "WHERE n = 1 ORDER BY row\n"
-        "  Drop rows with a missing value: SELECT %(cols)s FROM t WHERE %(where)s ORDER BY row"
+        "  Drop rows with a missing value: SELECT %(cols)s FROM t WHERE %(where)s ORDER BY row\n"
+        "  Several groups (top 3 and bottom 3 by %(num)s): write each group as its own SELECT "
+        "and join them: SELECT * FROM (SELECT %(key)s, %(num)s FROM t ORDER BY %(num)s DESC "
+        "LIMIT 3) UNION ALL SELECT * FROM (SELECT %(key)s, %(num)s FROM t ORDER BY %(num)s "
+        "LIMIT 3). Keep each condition simple; do not nest window functions."
     ).replace("%s\n", "\n  ".join(value_rules(table)).replace("%", "%%") + "\n", 1) \
         % _example_names(table)
 
@@ -210,7 +214,9 @@ def _example_names(table):
     key = names[table.label_col if table.label_col is not None else 0]
     cols = ", ".join(names) if len(names) <= 8 else ", ".join(names[:3]) + ", ..."
     checked = [n for n in names[1:3]] or names[:1]
-    return {"key": key, "cols": cols,
+    numeric = sorted(numeric_columns(table))
+    num = names[numeric[0]] if numeric else names[-1]
+    return {"key": key, "cols": cols, "num": num,
             "where": " AND ".join("%s IS NOT NULL" % n for n in checked)}
 
 

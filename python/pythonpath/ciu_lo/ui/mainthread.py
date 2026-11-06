@@ -35,6 +35,27 @@ class MainThread(object):
             self._queue.append(fn)
             self._schedule_locked()
 
+    def call(self, fn, timeout=120):
+        """Run fn on the main thread and return its result to the worker
+        that asked, raising whatever it raised."""
+        done = threading.Event()
+        box = {}
+
+        def run():
+            try:
+                box["value"] = fn()
+            except Exception as e:
+                box["error"] = e
+            finally:
+                done.set()
+
+        self.post(run)
+        if not done.wait(timeout):
+            raise RuntimeError("LibreOffice did not respond in time.")
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
     def post_text(self, text):
         with self._lock:
             if self._queue and isinstance(self._queue[-1], list):

@@ -94,7 +94,12 @@ class RunToSheet(unittest.TestCase):
             if "SELECT name, city, sales" in line:
                 ran += 1
                 S.run_to_sheet(line.split(": ", 1)[1], table())
-        self.assertEqual(ran, 2)
+            if "UNION ALL" in line:
+                ran += 1
+                sql = line.split("join them: ", 1)[1].split(". Keep", 1)[0]
+                r = S.run_to_sheet(sql, table())
+                self.assertEqual(len(r.rows), 6)
+        self.assertEqual(ran, 3)
 
 
 class Plans(unittest.TestCase):

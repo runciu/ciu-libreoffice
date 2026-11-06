@@ -262,13 +262,33 @@ class Extension(unittest.TestCase):
     def test_5f_bad_sheet_sql_reported(self):
         mock_ciu.STATE.plan_reply = json.dumps({"summary": "x", "operations": [
             {"tool": "sql_to_sheet", "sql": "DROP TABLE t"}]})
+        before = len(mock_ciu.STATE.requests)
         OFFICE.hook("prompt:clean it")
         OFFICE.hook("press:change")
         state = wait_done()
-        self.assertIn("CIU's SQL could not be used, so nothing was changed:", state["answer"])
+        self.assertIn("CIU's proposal could not be used, so nothing was changed:", state["answer"])
         self.assertIn("not authorized", state["answer"])
         self.assertFalse(state["pending"])
         self.assertEqual(self.doc.getSheets().getCount(), 1)
+        self.assertEqual(len(mock_ciu.STATE.requests) - before, 3)
+
+    def test_5f_sheet_sql_corrected(self):
+        bad = ("SELECT item, cost FROM (SELECT item, cost, ROW_NUMBER() OVER (PARTITION BY "
+               "CASE WHEN cost > 1 ELSE 0 END ORDER BY cost) AS rn FROM t) WHERE rn <= 1")
+        good = ("SELECT * FROM (SELECT item, cost FROM t ORDER BY cost DESC LIMIT 1) UNION ALL "
+                "SELECT * FROM (SELECT item, cost FROM t ORDER BY cost LIMIT 1)")
+        mock_ciu.STATE.plan_replies = [json.dumps({"summary": "Top and bottom.", "operations": [
+            {"tool": "sql_to_sheet", "sql": q, "sheet": "Ends"}]}) for q in (bad, good)]
+        OFFICE.hook("prompt:top and bottom item into a new sheet")
+        OFFICE.hook("press:change")
+        state = wait_done()
+        retry = mock_ciu.STATE.requests[-1]["messages"]
+        self.assertEqual(retry[-2]["role"], "assistant")
+        self.assertIn("That failed: SQLite error: near \"ELSE\": syntax error", retry[-1]["content"])
+        self.assertIn("New sheet 'Ends': 2 rows x 2 columns", state["answer"])
+        self.assertIn("Item | Cost\nTea | 2\nMilk | 1.5", state["answer"])
+        self.assertTrue(state["pending"])
+        OFFICE.hook("press:discard")
 
     def test_5g_clean_data(self):
         sheets = self.doc.getSheets()

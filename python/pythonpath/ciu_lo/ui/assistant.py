@@ -23,6 +23,7 @@ from .mainthread import MainThread
 
 W, H = 290, 300  # app-font units
 PAD = 6
+PLAN_ATTEMPTS = 3      # a proposal, then up to two corrections
 
 
 class AssistantDialog(object):
@@ -245,22 +246,53 @@ class AssistantDialog(object):
                 return
             self.ui.post(lambda: self._show_answer("Working out the change..."))
             sql = sqlmod if sqlmod.AVAILABLE else None
-            raw = self._fit_and_send(
-                lambda scale: prompts.build_action_messages(snap, request, status.n_ctx,
-                                                            scale, sql=sql),
-                lambda messages, max_tokens: self.client.chat_json(
-                    messages, plan_schema(sql=sql is not None), max_tokens=max_tokens))
-            if self.stop_event.is_set():
-                self.ui.post(lambda: self._show_answer("Stopped. Nothing was changed."))
-                return
-            try:
-                plan = parse_plan(raw, sheet=snap.sheet, allow_sql=sql is not None)
-            except PlanError as e:
-                msg = str(e)
+            schema = plan_schema(sql=sql is not None)
+            sent = {}
+
+            def build(scale):
+                messages, max_tokens = prompts.build_action_messages(
+                    snap, request, status.n_ctx, scale, sql=sql)
+                sent["messages"], sent["max_tokens"] = messages, max_tokens
+                return messages, max_tokens
+
+            raw = self._fit_and_send(build, lambda messages, max_tokens: self.client.chat_json(
+                messages, schema, max_tokens=max_tokens))
+            messages, table = sent["messages"], None
+            # A proposal that cannot be used goes back to the model with the
+            # reason, as a failed query does in Ask, so a slip such as a
+            # missing THEN is corrected instead of ending the request.
+            for attempt in range(PLAN_ATTEMPTS):
+                if self.stop_event.is_set():
+                    self.ui.post(lambda: self._show_answer("Stopped. Nothing was changed."))
+                    return
+                result, error = None, None
+                try:
+                    plan = parse_plan(raw, sheet=snap.sheet, allow_sql=sql is not None)
+                    if plan.operations and plan.operations[0].tool == SHEET_TOOL:
+                        if table is None:
+                            table = self.ui.call(lambda: Table(
+                                reader.read_full(self._model_doc(), snap)))
+                        result = sqlmod.run_to_sheet(plan.operations[0].sql, table)
+                except (PlanError, QueryError) as e:
+                    error = str(e)
+                if error is None:
+                    self.ui.post(lambda: self._show_plan(plan, snap, result))
+                    return
+                if attempt == PLAN_ATTEMPTS - 1:
+                    self.ui.post(lambda: self._show_answer(
+                        "CIU's proposal could not be used, so nothing was changed:\n" + error))
+                    return
                 self.ui.post(lambda: self._show_answer(
-                    "CIU's proposal could not be used, so nothing was changed:\n" + msg))
-                return
-            self.ui.post(lambda: self._show_plan(plan, snap))
+                    "CIU's proposal failed (%s). Asking it to correct it..." % _clip(error, 80)))
+                messages = prompts.retry_turn(messages, raw, error)
+                try:
+                    raw = self.client.chat_json(messages, schema, max_tokens=sent["max_tokens"])
+                except CIUError as e:
+                    if not e.context_full:
+                        raise
+                    self.ui.post(lambda: self._show_answer(
+                        "CIU's proposal could not be used, so nothing was changed:\n" + error))
+                    return
         except CIUError as e:
             msg = str(e)
             self.ui.post(lambda: self._show_answer(msg))
@@ -466,13 +498,13 @@ class AssistantDialog(object):
         except Exception:
             pass
 
-    def _show_plan(self, plan, snap=None):
+    def _show_plan(self, plan, snap=None, result=None):
         """Preview. Runs on the main thread, so it can look at the sheet."""
         if not plan.operations:
             self._show_answer("CIU did not propose a change:\n" + (plan.summary or "no reason given"))
             return
         if plan.operations[0].tool == SHEET_TOOL:
-            self._show_sheet_plan(plan, snap)
+            self._show_sheet_plan(plan, snap, result)
             return
         try:
             occupied = executor.occupied_cells(executor.get_sheet(self._model_doc(), plan.sheet), plan)
@@ -512,11 +544,12 @@ class AssistantDialog(object):
             "Apply (overwrite %d)" % len(occupied) if occupied else "Apply")
         self._refresh_buttons()
 
-    def _show_sheet_plan(self, plan, snap):
+    def _show_sheet_plan(self, plan, snap, result=None):
         op = plan.operations[0]
         try:
-            table = Table(reader.read_full(self._model_doc(), snap))
-            result = sqlmod.run_to_sheet(op.sql, table)
+            if result is None:
+                table = Table(reader.read_full(self._model_doc(), snap))
+                result = sqlmod.run_to_sheet(op.sql, table)
         except (QueryError, reader.SelectionError) as e:
             self._show_answer("CIU's SQL could not be used, so nothing was changed:\n%s\n\nSQL: %s"
                               % (e, op.sql))
